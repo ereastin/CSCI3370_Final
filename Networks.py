@@ -16,22 +16,23 @@ import xarray as xr
 import os
 
 class CNN(nn.Module):
-  def __init__(self, in_dim, hidden_dim, depth=5):
+  def __init__(self, in_dim, hidden_dim=64, depth=5):
     super(CNN, self).__init__()
     self.in_dim = in_dim  # number of channels in input -> needed?
     self.hidden_dim = hidden_dim
     blocks = []
-    for i in range(depth - 1):
-      blocks.append(self.cnn_block(self.hidden_dim))
-    blocks.append(self.cnn_block(1))
+    blocks.append(self.cnn_block(in_dim, hidden_dim))
+    for i in range(depth - 2):
+      blocks.append(self.cnn_block(hidden_dim, hidden_dim))
+    blocks.append(self.cnn_block(hidden_dim, 1))  # final layer, 1 channel
     self.net = nn.Sequential(*blocks)
 
-  def cnn_block(self, out_size):
-    return nn.Sequential([
-        nn.LazyConv2d(out_size, kernel_size=3, padding=1),
-        nn.LazyBatchNorm2d(),
+  def cnn_block(self, in_size, out_size):
+    return nn.Sequential(
+        nn.Conv2d(in_size, out_size, kernel_size=3, padding=1),
+        nn.BatchNorm2d(out_size),
         nn.ReLU()
-    ])
+    )
 
   def forward(self, x):
     out = self.net(x)

@@ -4,7 +4,8 @@ from PrecipDataset import PrecipDataset
 
 def main():
     pd = PrecipDataset('train')
-    _ = pd.__getitem__(1)  # this should be Feb 2001
+    for i in range(len(pd)):
+        _ = pd.__getitem__(i)
     # do some looking to make sure scratch dir stuff is right
     # verify interleaved source data
     # verify dates aligned appropriately
