@@ -53,7 +53,8 @@ def main():
     if mode == 'test':
         model = prep_model(model_name)
         model = load_model(model, model_name, device)
-        check_accuracy(model, model_name, test_loader, device)
+        vis_attention(model, test_loader, device)
+        #check_accuracy(model, model_name, test_loader, device)
     elif mode == 'train':
         if n_epochs == 0:  # use this as hyperparam search flag
             lr = np.logspace(-5, -1, 6)
@@ -75,7 +76,7 @@ def main():
             print(f'1 epoch run in {t2 - t1}')
         else:
             model = prep_model(model_name)
-            lr, wd = 1e-3, 1e-1  # inc: 1e-3, 1e-1  # (a)unet: 1e-3, 1e-5
+            lr, wd = 2.5e-3, 1e-5  # inc: 2.5e-3, 1e-1  # (a)unet: 1e-3, 1e-5
             optimizer = prep_optimizer(model, lr=lr, wd=wd)
             trainer = Trainer(model, model_name, train_loader, val_loader, optimizer, device)
             trainer.train(n_epochs)
@@ -87,6 +88,41 @@ def main():
             print(f'Training hyperparameters: {train_params}')
         # mp.spawn(run, args=(world_size, model_name, save_every, n_epochs), nprocs=world_size)
 
+# ---------------------------------------------------------------------------------
+def vis_attention(model, test_loader, device):
+    # just take random input
+    model = model.to(device)
+    model.eval()
+    upsmpl = nn.Upsample((96, 96), mode='trilinear')
+    # this the right way to do this?
+    def norm(t):
+        t -= torch.min(t)
+        t /= torch.max(t)
+        return t
+
+    for i, (x, y, t) in enumerate(test_loader):
+        idx = torch.randint(x.shape[0] - 1, (1,))
+        x = x.to(device)[idx]
+        y = y.to(device)[idx].view(96, 96).numpy(force=True)
+        out = model(x, test=True)
+        attn_wts = model.attn_wts
+        # attn_wts = [upsmpl(a) for a in attn_wts]
+        [print(a) for a in attn_wts]
+        return
+        fig, axs = plt.subplots(3, 2)
+        joint_attn = [attn_wts[0]]
+        
+        #for j in range(1, len(attn_wts)):
+            #joint_attn.append(torch.matmul(attn_wts[j], joint_attn[j - 1]))
+        #joint_attn = [norm(ja) for ja in joint_attn]
+        #attn_wts = [norm(a) for a in attn_wts]
+        for attn, ax in zip(attn_wts, axs.flat):
+            #ax.imshow(attn.view(96, 96).numpy(force=True))
+            ax.imshow(attn.view(attn.shape[2], attn.shape[3]).numpy(force=True))
+        axs[-1][-2].imshow(y)
+        axs[-1][-1].imshow(out.view(96, 96).numpy(force=True))
+        plt.savefig('attn_wts.png', dpi=300, bbox_inches='tight')
+        break
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, in_channels=64):
@@ -104,6 +140,9 @@ def prep_model(model_name, in_channels=64):
     else:
         print(f'Model "{model_name}" not valid')
 
+    # try weight init?
+    # need to get rid of Lazy layers
+    # model.apply(init_model_wts)
     return model
 
 # ---------------------------------------------------------------------------------
@@ -123,7 +162,7 @@ def prep_loaders(ddp=False):
     sampler = DistributedSampler(dataset, drop_last=True) if ddp else None
     train_loader = DataLoader(train_ds, batch_size=None, shuffle=True, pin_memory=True, sampler=sampler)
     val_loader = DataLoader(val_ds, batch_size=None, shuffle=True, pin_memory=True, sampler=sampler)
-    test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, pin_memory=True, sampler=sampler)
+    test_loader = DataLoader(test_ds, batch_size=None, shuffle=True, pin_memory=True, sampler=sampler)
     return train_loader, val_loader, test_loader
 
 # ---------------------------------------------------------------------------------
@@ -134,30 +173,14 @@ def load_model(model, model_name, device):
     return model
 
 # ---------------------------------------------------------------------------------
-def rmse(a, b):
-    return np.sqrt(np.mean((a - b) ** 2))
-
-# ---------------------------------------------------------------------------------
-def pcc(a, b):
-    a_mn = np.mean(a)
-    b_mn = np.mean(b)
-    return np.sum((a - a_mn) * (b - b_mn)) / np.sqrt(np.sum((a - a_mn) ** 2) * np.sum((b - b_mn) ** 2))
+def mse(a, b):
+    return np.mean((a - b) ** 2)
 
 # ---------------------------------------------------------------------------------
 def check_accuracy(model, model_name, loader, device):
     model = model.to(device)
     loss_list = []
-    rand_months = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
-    
-    lvls = np.linspace(0, 32, 17)
-    extent = (-108, -84.25, 24, 47.75)
-    lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
-    #cmap = 'Blues'
-    clrs = ['#FFFFFF','#BEFFFF','#79C8FF','#3E62FF','#2F2DDE','#79DA62','#58D248','#3BBF3D','#28A83A','#F8FB64', '#FFD666','#FFA255','#FF6039','#F61F1F','#CD3B3B','#AC3333','#CD1599','#C725E0']
-    cmap = colors.LinearSegmentedColormap.from_list('p_cmap', clrs, 18)
-    cmap.set_bad(color='white')
-    cmap.set_under(color='white')
-    
+    rand_months = torch.randint(len(loader) - 1, (4,))  # select 4 random months from test set
     model.eval()
     with torch.no_grad():
         for i, (x, y, t_str) in enumerate(loader):
@@ -171,33 +194,38 @@ def check_accuracy(model, model_name, loader, device):
             # rmse = torch.sqrt(mse)
 
             if i in rand_months:
-                sel_dates = torch.randint(output.shape[0], (3,)).tolist()
+                sel_dates = [0, -1]  # pick first/last days-hours of month, add more?
                 out_sel, y_sel = output[sel_dates].squeeze(1), y[sel_dates].squeeze(1)
                 # so these are now (B, 1, 96, 96) -> (len(sel_dates), 96, 96)
                 outs = list(torch.split(out_sel, 1, dim=0))
                 ys = list(torch.split(y_sel, 1, dim=0))
                 outs = [im.squeeze(0).numpy(force=True) for im in outs]
                 ys = [im.squeeze(0).numpy(force=True) for im in ys]
-                datas, rmses, pccs = [], [], []
+                # better way to interleave?
+                datas = []
+                mses = []
                 for j in range(len(outs)):
                     datas.append(outs[j])
                     datas.append(ys[j])
-                    rmses.append(rmse(outs[j], ys[j]))
-                    pccs.append(pcc(outs[j], ys[j]))
+                    mses.append(mse(outs[j], ys[j]))
                 
-                fig, axs = plt.subplots(3, 2, subplot_kw={'projection': ccrs.PlateCarree()})
+                fig, axs = plt.subplots(2, 2, subplot_kw={'projection': ccrs.PlateCarree()})
                 axs = axs.flatten()
                 fig.suptitle(f'Predicted vs. Observed Data on {t_str}: {model_name}')
+                lvls = np.linspace(np.min(datas), np.max(datas), 20)
+                extent = (-108, -84.25, 24, 47.75)
+                lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
+                cmap = 'Blues'
                 for i, (ax, data) in enumerate(zip(axs, datas)):
-                    cs = ax.contourf(lons, lats, data, lvls, transform=ccrs.PlateCarree(), cmap=cmap, extend='max')
+                    cs = ax.contourf(lons, lats, data, lvls, transform=ccrs.PlateCarree(), cmap=cmap)
                     ax.set_extent(extent, crs=ccrs.Geodetic())
                     ax.add_feature(cfeat.STATES)
                     if i == 0:
-                        ax.set_title(f'Predicted, RMSE: {rmses[0]:.3f}, PCC: {pccs[0]:.3f}', fontsize=6)
+                        ax.set_title('Predicted\nMSE: {mses[0]:.3f}', fontsize=8)
                     if i == 1: 
-                        ax.set_title('Observed', fontsize=6)
+                        ax.set_title('Observed\n', fontsize=8)
                     if i % 2 == 0:
-                        ax.set_title(f'RMSE: {rmses[i // 2]:.3f}, PCC: {pccs[i // 2]:.3f}', fontsize=6)
+                        ax.set_title(f'MSE: {mses[i // 2]:.3f}', fontsize=8)
 
                 fig.colorbar(cs, ax=axs, orientation='vertical', fraction=0.1, label='Accumulated Precip [mm]')
                 img_fname = f'{t_str}_sel.png'
@@ -215,13 +243,12 @@ class Trainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer
-        self.scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, [5, 100, 130], gamma=0.5)
+        self.scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, [100, 150, 175, 190], gamma=0.4)
         self.device = device
         self.save_every = save_every
         self.model_path = f'./models/{model_name}/'
         self.train_llist = []
         self.val_llist = []
-        self._ctr = 0
 
     def _best_loss(self):
         print(f'min train loss: {np.amin(self.train_llist)} @ epoch {np.argmin(self.train_llist)}')
@@ -240,19 +267,21 @@ class Trainer:
     def _run_batch(self, source, target):
         self.optimizer.zero_grad()
         out = self.model(source)
-        # how can we penalize negative predictions?
-        # this from https://stackoverflow.com/questions/50711530/what-would-be-a-good-loss-function-to-penalize-the-magnitude-and-sign-difference
-        loss = F.mse_loss(out, target, reduction='sum') + torch.sum(F.relu(-1 * out))
+        # relu already removes negative predictions..?
+        loss = F.mse_loss(out, target, reduction='sum')# + torch.sum(torch.where(out < 0, 1, 0))
         loss.backward()
         self.optimizer.step()
         return loss.item()
 
     def _run_val_batch(self, source, target):
         out = self.model(source)
-        val_loss = F.mse_loss(out, target, reduction='sum') + torch.sum(F.relu(-1 * out))
+        val_loss = F.mse_loss(out, target, reduction='sum')# + torch.sum(torch.where(out < 0, 1, 0))
         return val_loss.cpu().detach().numpy()
 
     def _run_epoch(self, epoch, save):
+        # not sure if this is needed, something re: shuffling if we care
+        # self.loader.sampler.set_epoch(epoch)
+        # print(f'[GPU {self.device}] Epoch {epoch} | Steps: {len(self.loader)}')  # does this split it up auto?
         e_loss = []
         self.model.train()
         for i, (source, target, t_str) in enumerate(self.train_loader):
@@ -286,35 +315,18 @@ class Trainer:
         torch.save(state, sv_pth)
         print(f'Model state saved at epoch {epoch}')
 
-    @property
-    def _stop_early(self):
-        # use val instead? really volatile is the problem
-        if self.train_llist[-1] >= self.train_llist[-2]:
-            self._ctr += 1
-        elif self.train_llist[-1] < self.train_llist[-2]:
-            self._ctr = 0
-
-        if self._ctr > 10:
-            return True
-        else:
-            return False
-
     def train(self, max_epochs, search=False):
         for epoch in range(1, max_epochs + 1):
             save = (epoch % self.save_every == 0)
             self._run_epoch(epoch, save)
             t_loss = self.train_llist[-1]
             v_loss = self.val_llist[-1]
-
+            # or just select best validation loss?
             if v_loss == np.min(self.val_llist):
                 self._save_point(epoch)
                 print(f'Epoch {epoch} | Train loss: {t_loss}, Val loss: {v_loss}')
                 print()
             self.scheduler.step()
-            if epoch > 1:
-                if self._stop_early:
-                    print(f'No improvement for 10 epochs, stopping now at epoch {epoch}')
-                    break
         print('Run completed.')
 
         if not search:

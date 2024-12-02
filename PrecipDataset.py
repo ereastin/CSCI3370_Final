@@ -11,7 +11,6 @@ import torch
 from torch.utils.data import Dataset
 import xarray as xr
 import os
-from cdo import *
 import time
 
 class PrecipDataset(Dataset):
@@ -39,48 +38,17 @@ class PrecipDataset(Dataset):
         MSWEP data (8x daily data at .1 degree grid)
         """
         super(PrecipDataset, self).__init__()
-        # excluding 2004 bc of some sisues with files being short by one day
         if mode == 'train':
-            self.years = [2001, 2002, 2005, 2006, 2008, 2009, 2010, 2011, 2012, 2014, 2015, 2016, 2017, 2019, 2020]
+            self.years = [2001, 2002, 2004, 2005, 2006, 2008, 2009, 2010, 2011, 2012, 2014, 2015, 2016, 2017, 2019, 2020]
         elif mode == 'val':
-            self.years = [2007]
+            self.years = [2007, 2018]
         elif mode == 'test':
-            self.years = [2003, 2013, 2018]
-
-        # num days per month by index, adjust for leap year in func
-        self.vars = ['Q', 'T', 'VO', 'PV', 'U', 'V', 'W', 'Z']
-        self.p = ['1000', '850', '700', '500', '200', '100', '50', '10']  # mbar, what pressure heights do we want.?
+            self.years = [2003, 2013]
 
         # filesystem locations
-        self.source_dir = '/projects/bccg/andromeda1/bccg/Shared_Data/REANA/ERA5/4xdaily/'
         self.scratch_dir = '/scratch/eastinev/'
-        self.target_dir = self.scratch_dir
-        self.cdo = Cdo(tempdir=self.scratch_dir)
-        #self.cdo.debug = True
-        #self.cdo.cleanTempDir()  # make sure to do this after completing, leave here for debugging now
-        
-        # remapping utils
-        self.era_wts_gen = True
-        self.era_remap_wts = os.path.join(self.scratch_dir, 'era_weights.nc')
-        self.era_gfile = os.path.join(self.scratch_dir, 'era_gridfile.txt')
-        # these should take care of cropping to region and up/down sampling
-        self.era_gfile_text = [
-            'gridtype  = lonlat',
-            'gridsize  = 9216',
-            'xsize     = 96',
-            'ysize     = 96',
-            'xname     = lon',
-            'xlongname = "longitude"',
-            'xunits    = "degrees_east"',
-            'yname     = lat',
-            'ylongname = "latitude"',
-            'yunits    = "degrees_north"',
-            'xfirst    = 252.0',
-            'xinc      = 0.25',
-            'yfirst    = 24.0',
-            'yinc      = 0.25'
-        ]
-        self.write_gridfiles()
+        self.source_dir = os.path.join(self.scratch_dir, 'era5')
+        self.target_dir = os.path.join(self.scratch_dir, 'mswep')
 
     def __len__(self):
         # length of dataset, total n_months in self.years
@@ -92,25 +60,17 @@ class PrecipDataset(Dataset):
         each month is a batch -> a month is minimum necessary condition statistically (?)
         should then be able to shuffle months but still preserve temporal associations
         """
-        t1 = time.time()
-        assert type(idx) is int
-
+#        t1 = time.time()
         year = self.years[idx // 12]
         month = idx % 12
         t_str = self.get_t_str(year, month)
         source = self.get_source(t_str)
         target = self.get_target(t_str)
-        t2 = time.time()
+#        t2 = time.time()
         
-        print(f'Got item {t_str} for processing from idx: {idx} in {t2 - t1}...\n')
-        return
+#        print(f'Got item {t_str} for processing from idx: {idx} in {t2 - t1}...\n')
         sample = (source, target, t_str)
         return sample
-
-    def write_gridfiles(self):
-        if not os.path.exists(self.era_gfile):
-            with open(self.era_gfile, 'w+') as f:
-                f.write('\n'.join(self.era_gfile_text))
 
     def get_t_str(self, year, month):
         year, month = str(year), str(month + 1)
@@ -120,29 +80,18 @@ class PrecipDataset(Dataset):
         """
         ERA5 indexed as 'lat', 'lon', 'time', 'lev'
         """
-        # TODO: so now why is this taking so effing long?
-        source = []
-        for var in self.vars:
-            fname = var + '.' + t_str + '.nc'  # {var}.{YYYY}{MM}.nc
-            var_pth = os.path.join(self.source_dir, var, fname)
-            if not self.era_wts_gen:
-                self.cdo.genbil(self.era_gfile, input=f'-sellevel,{",".join(self.p)} {var_pth}', output=self.era_remap_wts)
-                self.era_wts_gen = True
-
-            # do remapping -> does this handle/preserve time and pressure dims..?
-            outfile = os.path.join(self.scratch_dir, f'{var}.nc')
-            self.cdo.remap(self.era_gfile, self.era_remap_wts, input=f'-sellevel,{",".join(self.p)} {var_pth}', output=outfile)
-            ds = xr.open_dataset(outfile)
-            source.append(torch.tensor(ds.to_dataarray().data).squeeze(0))
-
+        f = os.path.join(self.source_dir,  'C.' + t_str + '.nc')
+        da = xr.load_dataset(f).to_dataarray()
+        times = da['time'].data
+        # straight reshaping of data array not equivalent.. wonder if there is a way tho this is ~ 4x slower
+        # are we sure this is right.? should it even matter?
+        source = [torch.tensor(da.sel(time=str(t)).data).reshape(-1, da.shape[3], da.shape[4]).unsqueeze(0) for t in times]
+        source = torch.cat(source, dim=0)
         # each chunk of source will be (time, lev, lat, lon)
-        source = torch.stack(source, dim=1)  # (time, N, lev, lat, lon) stack along new dim N vars
-        source = source.reshape(source.shape[0], -1, source.shape[3], source.shape[4])  # voodoo dim magic -> (time, N * lev, lat, lon)
-        # print(f'Source: {fname}, shape: {source.shape}')
         return source
 
     def get_target(self, t_str):
-        f = os.path.join(self.scratch_dir, 'P.' + t_str + '.nc')
-        target = torch.tensor(xr.load_dataset(f).to_dataarray().data).permute(1, 0, 2, 3)
-        # print(f'Target: {f}, shape: {target.shape}')
+        f = os.path.join(self.target_dir, 'P.' + t_str + '.nc')
+        target = torch.tensor(xr.load_dataset(f).to_dataarray().data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
         return target
+

@@ -16,7 +16,7 @@ import xarray as xr
 import os
 
 class CNN(nn.Module):
-  def __init__(self, in_dim, hidden_dim=64, depth=5):
+  def __init__(self, in_dim, hidden_dim=256, depth=5):
     super(CNN, self).__init__()
     self.in_dim = in_dim  # number of channels in input -> needed?
     self.hidden_dim = hidden_dim
@@ -29,7 +29,7 @@ class CNN(nn.Module):
 
   def cnn_block(self, in_size, out_size):
     return nn.Sequential(
-        nn.Conv2d(in_size, out_size, kernel_size=3, padding=1),
+        nn.Conv2d(in_size, out_size, kernel_size=3, padding=1, bias=False),
         nn.BatchNorm2d(out_size),
         nn.ReLU()
     )
@@ -43,10 +43,10 @@ class UNetConvBlock(nn.Module):
     super(UNetConvBlock, self).__init__()
 
     self.net = nn.Sequential(
-        nn.Conv2d(in_size, out_size, kernel_size=3, padding=1),
+        nn.Conv2d(in_size, out_size, kernel_size=3, padding=1, bias=False),
         nn.BatchNorm2d(out_size),
         nn.ReLU(),
-        nn.Conv2d(out_size, out_size, kernel_size=3, padding=1),
+        nn.Conv2d(out_size, out_size, kernel_size=3, padding=1, bias=False),
         nn.BatchNorm2d(out_size),
         nn.ReLU()
     )
@@ -59,7 +59,7 @@ class UNetDeconvBlock(nn.Module):
   def __init__(self, in_size, out_size):
     super(UNetDeconvBlock, self).__init__()
 
-    self.upsmpl = nn.ConvTranspose2d(in_size, out_size, kernel_size=2, stride=2)
+    self.upsmpl = nn.ConvTranspose2d(in_size, out_size, kernel_size=2, stride=2, bias=False)
     self.conv = UNetConvBlock(in_size, out_size)
 
   def forward(self, x_up, x_down):
@@ -92,7 +92,7 @@ class UNet(nn.Module):
     self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
     self.final = nn.LazyConv2d(1, kernel_size=3, padding=1)
 
-    start_pwr = 6  # 2 ** 6 channels after first conv
+    start_pwr = 7  # 2 ** 6 channels after first conv, 7+ model to heavy
     self.down = build_down_path(UNetConvBlock, in_size, start_pwr, depth)
 
     start_pwr += depth - 1
@@ -132,7 +132,7 @@ class Attention2D(nn.Module):
     self.psi = nn.Sequential(
         nn.Conv2d(int_channels, 1, kernel_size=1, padding=0, stride=1, bias=True),
         nn.Sigmoid(),
-        nn.ConvTranspose2d(1, 1, kernel_size=2, stride=2)
+        nn.Upsample(scale_factor=2, mode='bilinear')  # use this instead of tranpose conv!
     )
 
   def forward(self, g, x):
@@ -141,7 +141,7 @@ class Attention2D(nn.Module):
     out = F.relu(xx + gg)
     psi = self.psi(out)
     res = psi * x  # hadamard prod (B, dwn_channels, H/2, W/2) -> cat to upsampled output
-    return res
+    return res, psi
 
 def build_attn_path(up_size, depth):
   """
@@ -162,7 +162,7 @@ class AttentionUNet(nn.Module):
     self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
     self.final = nn.LazyConv2d(1, kernel_size=3, padding=1)
 
-    start_pwr = 6
+    start_pwr = 7
     self.down = build_down_path(UNetConvBlock, in_size, start_pwr, depth)
 
     start_pwr += depth - 1
@@ -170,8 +170,9 @@ class AttentionUNet(nn.Module):
     self.up = build_up_path(UNetDeconvBlock, in_size, depth)
 
     self.attn = build_attn_path(in_size, depth)
+    self.attn_wts = []
 
-  def forward(self, x):
+  def forward(self, x, test=False):
     output_steps = []
     for i, step in enumerate(self.down):
       x = step(x)
@@ -181,7 +182,9 @@ class AttentionUNet(nn.Module):
 
     for i, step in enumerate(self.up):
       att = self.attn[i]
-      att_out = att(x, output_steps[-1 - i])
+      att_out, wts = att(x, output_steps[-1 - i])
+      if test:
+          self.attn_wts.append(wts)
       x = step(x, att_out)
 
     out = self.final(x)
@@ -191,25 +194,6 @@ class AttentionUNet(nn.Module):
 test_in = torch.zeros((1, 64, 96, 96))
 net = AttentionUNet(64)
 net(test_in)
-
-class InceptionBlock(nn.Module):
-  def __init__(self, outb1, outb2a, outb2b, outb3a, outb3b, outb4b):
-    # from D2L website
-    super(InceptionBlock, self).__init__()
-    self.b1 = nn.LazyConv2d(outb1, kernel_size=1)
-    self.b2a = nn.LazyConv2d(outb2a, kernel_size=1)
-    self.b2b = nn.LazyConv2d(outb2b, kernel_size=3, padding=1)
-    self.b3a = nn.LazyConv2d(outb3a, kernel_size=1)
-    self.b3b = nn.LazyConv2d(outb3b, kernel_size=5, padding=2)
-    self.b4a = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-    self.b4b = nn.LazyConv2d(outb4b, kernel_size=1)
-
-  def forward(self, x):
-    x1 = F.relu(self.b1(x))
-    x2 = F.relu(self.b2b(self.b2a(x)))
-    x3 = F.relu(self.b3a(self.b3b(x)))
-    x4 = F.relu(self.b4a(self.b4b(x)))
-    return torch.cat([x1, x2, x3, x4], dim=1)  # cat along channel dim
 
 class CAEEncoder(nn.Module):
   def __init__(self, in_size, out_size):
@@ -239,7 +223,7 @@ class CAEDecoder(nn.Module):
     return out
 
 class CAE_LSTM(nn.Module):
-  def __init__(self, in_size, lin_out1=2048, lin_out2=18432, hidden_size=256, depth=4):
+  def __init__(self, in_size, lin_out1=2048, lin_out2=9216, hidden_size=2048, depth=5):
     """
     in_size: number of channels of the input, e.g. 64 for 8 ERA5 vars at 8 pressure heights
     lin_out1: input feature dimension from first linear layer to LSTM
@@ -248,7 +232,7 @@ class CAE_LSTM(nn.Module):
     super(CAE_LSTM, self).__init__()
 
     self.flat = nn.Flatten()
-    unflat_shape = (512, 6, 6)
+    unflat_shape = (1024, 3, 3)
     self.unflat = nn.Unflatten(1, unflat_shape)  # should give (B, 128, 6, 6)
     self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
     self.linear1 = nn.LazyLinear(lin_out1)
