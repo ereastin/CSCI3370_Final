@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torchinfo import summary
 
 def main():
-    net = IRNv2UNet(64)  # out is (B, 4608, 4, 4)
+    net = IRNv2UNet(64)
     summary(net, input_size=(120, 64, 96, 96))  # ~ 20GB forward/back passes.. how much do we have??
 
 # ---------------------------------------------------------------------------------
@@ -23,13 +23,13 @@ class IRNv2_S1(nn.Module):
     # have this layer preserve size instead?
 
     self.stem_a = nn.Sequential(
-        nn.Conv2d(in_size, base, kernel_size=5, stride=1, padding=2, bias=False), nn.ReLU(),
+        nn.Conv2d(in_size, base, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.Conv2d(base, base, kernel_size=3, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(base, 2 * base, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        # nn.Conv2d(in_size, s1, kernel_size=3, stride=2, padding=0), nn.ReLU(),
-        # nn.Conv2d(s1, s1, kernel_size=3, stride=1, padding=0), nn.ReLU(),
-        # nn.Conv2d(s1, 2 * s1, kernel_size=3, stride=1, padding=1), nn.ReLU(),
-        nn.BatchNorm2d(2 * base)
+        #nn.Conv2d(in_size, base, kernel_size=3, stride=2, padding=1, bias=False), nn.ReLU(),
+        #nn.Conv2d(base, base, kernel_size=3, stride=1, padding=0, bias=False), nn.ReLU(),
+        #nn.Conv2d(base, 2 * base, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
+        nn.BatchNorm2d(2 * base, eps=1e-2)
     )
 
   def forward(self, x):
@@ -41,11 +41,11 @@ class IRNv2_S2(nn.Module):
     super(IRNv2_S2, self).__init__()
     self.stem_b1 = nn.Sequential(
         nn.Conv2d(2 * base, 2 * base, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(2 * base)
+        nn.BatchNorm2d(2 * base, eps=1e-2)
     )
     self.stem_b2 = nn.Sequential(
         nn.Conv2d(2 * base, 3 * base, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(3 * base)
+        nn.BatchNorm2d(3 * base, eps=1e-2)
     )
 
   def forward(self, x):
@@ -58,14 +58,14 @@ class IRNv2_S3(nn.Module):
     self.stem_c1 = nn.Sequential(
         nn.Conv2d(in_size, 2 * base, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(2 * base, 3 * base, kernel_size=3, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(3 * base)
+        nn.BatchNorm2d(3 * base, eps=1e-2)
     )
     self.stem_c2 = nn.Sequential(
         nn.Conv2d(in_size, 2 * base, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(2 * base, 2 * base, kernel_size=(7, 1), stride=1, padding=(3, 0), bias=False), nn.ReLU(),
         nn.Conv2d(2 * base, 2 * base, kernel_size=(1, 7), stride=1, padding=(0, 3), bias=False), nn.ReLU(),
         nn.Conv2d(2 * base, 3 * base, kernel_size=3, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(3 * base)
+        nn.BatchNorm2d(3 * base, eps=1e-2)
     )
 
   def forward(self, x):
@@ -77,7 +77,7 @@ class IRNv2_S4(nn.Module):
     super(IRNv2_S4, self).__init__()
     self.stem_d1 = nn.Sequential(  # this last Conv is pad 0 if using odd input shape
         nn.Conv2d(in_size, in_size, kernel_size=3, stride=2, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size)
+        nn.BatchNorm2d(in_size, eps=1e-2)
     )
     self.stem_d2 = nn.MaxPool2d(2, stride=2, padding=0)
 
@@ -91,21 +91,21 @@ class IRNv2_A(nn.Module):
 
     self.b1 = nn.Sequential(
         nn.Conv2d(in_size, base, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(base)
+        nn.BatchNorm2d(base, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.Conv2d(in_size, base, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(base, base, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(base)
+        nn.BatchNorm2d(base, eps=1e-2)
     )
     self.b3 = nn.Sequential(
         nn.Conv2d(in_size, base, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(base, 3 * base // 2, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.Conv2d(3 * base // 2, 2 * base, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(2 * base)
+        nn.BatchNorm2d(2 * base, eps=1e-2)
     )
     self.comb = nn.Conv2d(4 * base, in_size, kernel_size=1, stride=1, padding=0, bias=False)
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.ReLU()
 
   def forward(self, x):
     x_conv = torch.cat([self.b1(x), self.b2(x), self.b3(x)], dim=1)  # filter cat right?
@@ -120,15 +120,15 @@ class IRNv2_redA(nn.Module):
     self.b1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=0)
     self.b2 = nn.Sequential(
         nn.Conv2d(in_size, in_size, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size)
+        nn.BatchNorm2d(in_size, eps=1e-2)
     )
     self.b3 = nn.Sequential(
         nn.Conv2d(in_size, 3 * in_size // 2, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(3 * in_size // 2, 3 * in_size // 2, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.Conv2d(3 * in_size // 2, in_size, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size)
+        nn.BatchNorm2d(in_size, eps=1e-2)
     )
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.1))
 
   def forward(self, x):
     return self.final(torch.cat([self.b1(x), self.b2(x), self.b3(x)], dim=1))
@@ -139,16 +139,16 @@ class IRNv2_B(nn.Module):
     super(IRNv2_B, self).__init__()
     self.b1 = nn.Sequential(
         nn.Conv2d(in_size, in_size // 8, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 8)
+        nn.BatchNorm2d(in_size // 8, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.Conv2d(in_size, in_size // 10, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(in_size // 10, in_size // 9, kernel_size=(7, 1), stride=1, padding=(3, 0), bias=False), nn.ReLU(),
         nn.Conv2d(in_size // 9, in_size // 8, kernel_size=(1, 7), stride=1, padding=(0, 3), bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 8)
+        nn.BatchNorm2d(in_size // 8, eps=1e-2)
     )
     self.comb = nn.Conv2d(in_size // 4, in_size, kernel_size=1, stride=1, padding=0, bias=False)
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.ReLU()
 
   def forward(self, x):
     x_conv = torch.cat([self.b1(x), self.b2(x)], dim=1)
@@ -163,20 +163,20 @@ class IRNv2_redB(nn.Module):
     self.b2 = nn.Sequential(
         nn.Conv2d(in_size, 2 * in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(2 * in_size // 12, 5 * in_size // 12, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(5 * in_size // 12)
+        nn.BatchNorm2d(5 * in_size // 12, eps=1e-2)
     )
     self.b3 = nn.Sequential(
         nn.Conv2d(in_size, 2 * in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(2 * in_size // 12, 3 * in_size // 12, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(3 * in_size // 12)
+        nn.BatchNorm2d(3 * in_size // 12, eps=1e-2)
     )
     self.b4 = nn.Sequential(
         nn.Conv2d(in_size, 2 * in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(2 * in_size // 12, 3 * in_size // 12, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.Conv2d(3 * in_size // 12, 4 * in_size // 12, kernel_size=3, stride=2, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(4 * in_size // 12)
+        nn.BatchNorm2d(4 * in_size // 12, eps=1e-2)
     )
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.1))
 
   def forward(self, x):
     return self.final(torch.cat([self.b1(x), self.b2(x), self.b3(x), self.b4(x)], dim=1))
@@ -187,17 +187,17 @@ class IRNv2_C(nn.Module):
     super(IRNv2_C, self).__init__()
     self.b1 = nn.Sequential(
         nn.Conv2d(in_size, in_size // 10, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 10)
+        nn.BatchNorm2d(in_size // 10, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.Conv2d(in_size, in_size // 10, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.Conv2d(in_size // 10, in_size // 9, kernel_size=(1, 3), stride=1, padding=(0, 1), bias=False), nn.ReLU(),
         nn.Conv2d(in_size // 9, in_size // 8, kernel_size=(3, 1), stride=1, padding=(1, 0), bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 8)
+        nn.BatchNorm2d(in_size // 8, eps=1e-2)
     )
     cat_size = in_size // 8 + in_size // 10
     self.comb = nn.Conv2d(cat_size, in_size, kernel_size=1, stride=1, padding=0, bias=False)
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.1))
 
   def forward(self, x):
     x_conv = torch.cat([self.b1(x), self.b2(x)], dim=1)
@@ -210,24 +210,24 @@ class IRNv2_revLB(nn.Module):
     super(IRNv2_revLB, self).__init__()
     self.b1 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 12)
+        nn.BatchNorm2d(in_size // 12, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 12, in_size // 6, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 6)
+        nn.BatchNorm2d(in_size // 6, eps=1e-2)
     )
     self.b3 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size //12, in_size // 8, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 8, in_size // 4, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 4)
+        nn.BatchNorm2d(in_size // 4, eps=1e-2)
     )
     # self.ct = nn.Sequential(
     #     nn.ConvTranspose2d(in_size, out_size, kernel_size=3, stride=1, padding=1), nn.ReLU(),
     #     nn.BatchNorm2d(out_size)
     # )
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Dropout2d(p=0.1)
 
   def forward(self, x, cat_in):
     comb = torch.cat([x, cat_in], dim=1)
@@ -239,19 +239,19 @@ class IRNv2_revLA(nn.Module):
     super(IRNv2_revLA, self).__init__()
     self.b1 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 6, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 6)
+        nn.BatchNorm2d(in_size // 6, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 12, kernel_size=1, stride=1, padding=0, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 12, in_size // 8, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 8, in_size // 3, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // 3)
+        nn.BatchNorm2d(in_size // 3, eps=1e-2)
     )
     # self.ct = nn.Sequential(
     #     nn.ConvTranspose2d(in_size, out_size, kernel_size=3, stride=1, padding=1), nn.ReLU(),
     #     nn.BatchNorm2d(out_size)
     # )
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Dropout2d(p=0.1)
 
   def forward(self, x, cat_in):
     comb = torch.cat([x, cat_in], dim=1)
@@ -267,18 +267,18 @@ class IRNv2_revRL(nn.Module):
     self.b1 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 24, kernel_size=3, stride=2, padding=0, output_padding=1, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 24, in_size // hid, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // hid)
+        nn.BatchNorm2d(in_size // hid, eps=1e-2)
     )
     self.b2 = nn.Sequential(
         nn.ConvTranspose2d(in_size, in_size // 24, kernel_size=3, stride=1, padding=1, bias=False), nn.ReLU(),
         nn.ConvTranspose2d(in_size // 24, in_size // hid, kernel_size=3, stride=2, padding=0, output_padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(in_size // hid)
+        nn.BatchNorm2d(in_size // hid, eps=1e-2)
     ) 
     # self.ct = nn.Sequential(
     #     nn.ConvTranspose2d(in_size, out_size, kernel_size=3, stride=2, padding=0, output_padding=1), nn.ReLU(),
     #     nn.BatchNorm2d(out_size)
     # )
-    self.final = nn.Sequential(nn.ReLU(), nn.Dropout2d(p=0.2))
+    self.final = nn.Dropout2d(p=0.1)
 
   def forward(self, x):
     return self.final(torch.cat([self.b1(x), self.b2(x)], dim=1))
@@ -289,7 +289,7 @@ class IRNv2_revS(nn.Module):
     super(IRNv2_revS, self).__init__()
     self.ct = nn.Sequential(
         nn.ConvTranspose2d(in_size, out_size, kernel_size=3, stride=stride, padding=padding, output_padding=1, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(out_size)
+        nn.BatchNorm2d(out_size, eps=1e-2)
     )
 
   def forward(self, x):
@@ -301,7 +301,7 @@ class IRNv2_revScat(nn.Module):
     super(IRNv2_revScat, self).__init__()
     self.ct = nn.Sequential(
         nn.ConvTranspose2d(in_size, out_size, kernel_size=3, stride=stride, padding=0, bias=False), nn.ReLU(),
-        nn.BatchNorm2d(out_size)
+        nn.BatchNorm2d(out_size, eps=1e-2)
     )
 
   def forward(self, x, cat_in):
@@ -309,7 +309,7 @@ class IRNv2_revScat(nn.Module):
 
 # ---------------------------------------------------------------------------------
 class IRNv2UNet(nn.Module):
-  def __init__(self, in_size, Na=3, Nb=5, Nc=3):
+  def __init__(self, in_size, Na=1, Nb=1, Nc=1):
     """
     Na, Nb, Nc: number of times to run through layers A, B, C
     Inception-ResNet-v1/2 use 5, 10, 5
@@ -318,8 +318,8 @@ class IRNv2UNet(nn.Module):
     base = in_size
     self.Na, self.Nb, self.Nc = Na, Nb, Nc
     # down layers
-    self.s1 = IRNv2_S1(in_size, base)  # (B, 256, 45, 45) (256, 94, 94) OR (128, 94, 94)
-    self.s2 = IRNv2_S2(128, base)  # (B, 640, 22, 22) (640, 46, 46) OR (320, 46, 46)
+    self.s1 = IRNv2_S1(in_size, base)  # (B, 128, 45, 45) OR (128, 94, 94)
+    self.s2 = IRNv2_S2(128, base)  # (B, 640, 22, 22) OR (320, 46, 46)
     self.s3 = IRNv2_S3(320, base)  # (B, 768, 20, 20) (768, 44, 44) OR (384, 44, 44)
     self.s4 = IRNv2_S4(384)  # (B, 1536, 10, 10) (1536, 22, 22) OR (768, 22, 22)
     self.a_n = [IRNv2_A(768, base) for _ in range(Na)]  # (B, 1536, 10, 10) (1536, 22, 22) OR (768, 22, 22)

@@ -53,32 +53,32 @@ def main():
     if mode == 'test':
         model = prep_model(model_name)
         model = load_model(model, model_name, device)
-        check_accuracy(model, model_name, test_loader, device)
+        check_accuracy(model, model_name, test_loader, device, bias=True)
     elif mode == 'train':
         if n_epochs == 0:  # use this as hyperparam search flag
-            lr = np.logspace(-5, -1, 6)
-            wd = np.logspace(-5, -1, 3)
+            lr = np.logspace(-5, -1, 5)
+            wd = np.logspace(-3, -1, 3)
             for l in lr:
                 for w in wd:
                     print(f'Learning rate: {l}, Weight decay: {w}')
                     model = prep_model(model_name)
                     optim = prep_optimizer(model, l, w)
-                    trainer = Trainer(model, model_name, train_loader, val_loader, optim, device)
-                    trainer.train(3, search=True)
+                    trainer = Trainer(model, model_name, train_loader, val_loader, optim, device, 3)
+                    trainer.train(search=True)
         elif n_epochs == 1:
             t1 = time.time()
             model = prep_model(model_name)
             optim = prep_optimizer(model)
-            trainer = Trainer(model, model_name, train_loader, val_loader, optim, device)
-            trainer.train(1)
+            trainer = Trainer(model, model_name, train_loader, val_loader, optim, device, 1)
+            trainer.train()
             t2 = time.time()
             print(f'1 epoch run in {t2 - t1}')
         else:
             model = prep_model(model_name)
-            lr, wd = 1e-3, 1e-1  # inc: 1e-3, 1e-1  # (a)unet: 1e-3, 1e-5
+            lr, wd = 1e-7, 1e-5  # inc: 1e-3, 1e-1  # (a)unet: 1e-3, 1e-5
             optimizer = prep_optimizer(model, lr=lr, wd=wd)
-            trainer = Trainer(model, model_name, train_loader, val_loader, optimizer, device)
-            trainer.train(n_epochs)
+            trainer = Trainer(model, model_name, train_loader, val_loader, optimizer, device, n_epochs)
+            trainer.train()
             train_params = {
                 'learning_rate': lr,
                 'L2_weight_decay': wd,
@@ -144,79 +144,182 @@ def pcc(a, b):
     return np.sum((a - a_mn) * (b - b_mn)) / np.sqrt(np.sum((a - a_mn) ** 2) * np.sum((b - b_mn) ** 2))
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device):
-    model = model.to(device)
-    loss_list = []
-    rand_months = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
-    
-    lvls = np.linspace(0, 32, 17)
-    extent = (-108, -84.25, 24, 47.75)
-    lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
-    #cmap = 'Blues'
+def calc_daily_bias(a, b):
+    # inputs are (B, 1, 96, 96)
+    n_days = a.shape[0] // 4
+    step_bias = a - b
+    day_bias = torch.zeros((n_days,) + tuple(a.shape[1:]))
+    for i in range(n_days):
+        slc = slice(i * 4, (i + 1) * 4)
+        day_bias[i] = torch.sum(step_bias[slc], dim=0)
+
+    return torch.mean(day_bias, dim=0).squeeze(0)  # reduce dim 0 for monthly mean bias?
+
+# ---------------------------------------------------------------------------------
+def plot_bias(monthly_bias, extent, coords, model_name):
+    """
+    DJF winter, MAM spring, JJA summer, SON autumn
+    test years are not shuffled
+    """
+    # these are currently the mean 6-hourly bias over each season..
+    # want mean daily bias? mean monthly? mean seasonal?
+    # Lin 2017 use mm per day bias, do that?
+    monthly_bias = torch.stack(monthly_bias, dim=0)
+    test = monthly_bias[:12] + monthly_bias[12:]
+    print(f'Monthly average bias mm per day {torch.mean(test, dim=(1, 2))}')
+    sel_sp = [2, 3, 4, 14, 15, 16]
+    sel_su = [5, 6, 7, 17, 18, 19]
+    sel_a = [8, 9, 10, 20, 21, 22]
+    sel_w = [11, 0, 1, 23, 12, 13]
+    spring = torch.mean(monthly_bias[sel_sp], dim=0).numpy(force=True)
+    summer = torch.mean(monthly_bias[sel_su], dim=0).numpy(force=True)
+    autumn = torch.mean(monthly_bias[sel_a], dim=0).numpy(force=True)
+    winter = torch.mean(monthly_bias[sel_w], dim=0).numpy(force=True)
+
+    datas = [spring, summer, autumn, winter]
+    titles = ['MAM', 'JJA', 'SON', 'DJF']
+    lvls = np.linspace(-2, 2, 17)
+    lons, lats = coords[0], coords[1]
+    cmap = 'BrBG'
+    fig, axs = plt.subplots(2, 2, subplot_kw={'projection': ccrs.PlateCarree()}, figsize=(8, 8))
+    axs = axs.flatten()
+    fig.suptitle(f'Seasonal Precipitation Bias: {model_name}')
+    for i, (ax, data, title) in enumerate(zip(axs, datas, titles)):
+        cs = ax.contourf(lons, lats, data, lvls, transform=ccrs.PlateCarree(), cmap=cmap, extend='both')
+        ax.set_extent(extent, crs=ccrs.Geodetic())
+        ax.add_feature(cfeat.STATES)
+        ax.set_title(title)
+
+    fig.colorbar(cs, ax=axs, orientation='horizontal', fraction=0.046, pad=0.04, label=r'Precip Bias [mm$\cdot$day$^{-1}$]')
+    img_fname = f'biases.png'
+    img_path = os.path.join(f'./models/{model_name}/', img_fname)
+    plt.savefig(img_path, dpi=300, bbox_inches='tight')  # still too much space between rows
+    print(f'Seasonal bias plotted to {img_path}')
+
+# ---------------------------------------------------------------------------------
+def plot_precip(sel_out, sel_y, sel_t, extent, coords, model_name):
+    # colormap stuff
     clrs = ['#FFFFFF','#BEFFFF','#79C8FF','#3E62FF','#2F2DDE','#79DA62','#58D248','#3BBF3D','#28A83A','#F8FB64', '#FFD666','#FFA255','#FF6039','#F61F1F','#CD3B3B','#AC3333','#CD1599','#C725E0']
     cmap = colors.LinearSegmentedColormap.from_list('p_cmap', clrs, 18)
     cmap.set_bad(color='white')
     cmap.set_under(color='white')
+
+    lvls = np.linspace(0, 32, 17)
+    lons, lats = coords[0], coords[1]
+    days = [17, 7, 18, 21]
     
+    for i, (output, target, t_str) in enumerate(zip(sel_out, sel_y, sel_t)):
+        low = (days[i] - 1) * 4
+        high = low + 4
+        sel_dates = slice(low, high)
+        outs, targs = output[sel_dates].squeeze(1), target[sel_dates].squeeze(1)
+        # so these are now (B, 1, 96, 96) -> (len(sel_dates), 96, 96)
+
+        outs = list(torch.split(outs, 1, dim=0))
+        targs = list(torch.split(targs, 1, dim=0))
+        outs = [im.squeeze(0).numpy(force=True) for im in outs]
+        targs = [im.squeeze(0).numpy(force=True) for im in targs]
+        datas = outs + targs 
+        rmses = [rmse(o, t) for (o, t) in zip(outs, targs)]
+        pccs = [pcc(o, t) for (o, t) in zip(outs, targs)]
+
+        fig, axs = plt.subplots(2, 4, subplot_kw={'projection': ccrs.PlateCarree()}, figsize=(13, 6))
+        axs = axs.flatten()
+        fig.suptitle(f'Predicted vs. Observed Data on {t_str}: {model_name}')
+        for j, (ax, data) in enumerate(zip(axs, datas)):
+            cs = ax.contourf(lons, lats, data, lvls, transform=ccrs.PlateCarree(), cmap=cmap, extend='max')
+            ax.set_extent(extent, crs=ccrs.Geodetic())
+            ax.add_feature(cfeat.STATES)
+            if j < 4:
+                ax.set_title(f'RMSE: {rmses[i]:.3f}, PCC: {pccs[i]:.3f}', fontsize=6)
+
+        fig.colorbar(cs, ax=axs, orientation='horizontal', fraction=0.046, pad=0.04, label='Accumulated Precip [mm]')
+        img_fname = f'{t_str[:4]}-{t_str[-2:]-{str(days[i]).zfill(2)}}.png'
+        img_path = os.path.join(f'./models/{model_name}/', img_fname)
+        plt.savefig(img_path, dpi=300, bbox_inches='tight')  # still too much space between rows
+
+# ---------------------------------------------------------------------------------
+def vis_attention(model, test_loader, device):
+    # just take random input
+    model = model.to(device)
+    model.eval()
+    upsmpl = nn.Upsample((96, 96), mode='trilinear')
+    # this the right way to do this?
+    def norm(t):
+        t -= torch.min(t)
+        t /= torch.max(t)
+        return t
+
+    for i, (x, y, t) in enumerate(test_loader):
+        idx = torch.randint(x.shape[0] - 1, (1,))
+        x = x.to(device)[idx]
+        y = y.to(device)[idx].view(96, 96).numpy(force=True)
+        out = model(x, test=True)
+        attn_wts = model.attn_wts
+        # attn_wts = [upsmpl(a) for a in attn_wts]
+        [print(a) for a in attn_wts]
+        return
+        fig, axs = plt.subplots(3, 2)
+        joint_attn = [attn_wts[0]]
+        
+        #for j in range(1, len(attn_wts)):
+            #joint_attn.append(torch.matmul(attn_wts[j], joint_attn[j - 1]))
+        #joint_attn = [norm(ja) for ja in joint_attn]
+        #attn_wts = [norm(a) for a in attn_wts]
+        for attn, ax in zip(attn_wts, axs.flat):
+            #ax.imshow(attn.view(96, 96).numpy(force=True))
+            ax.imshow(attn.view(attn.shape[2], attn.shape[3]).numpy(force=True))
+        axs[-1][-2].imshow(y)
+        axs[-1][-1].imshow(out.view(96, 96).numpy(force=True))
+        plt.savefig('attn_wts.png', dpi=300, bbox_inches='tight')
+        break
+
+# ---------------------------------------------------------------------------------
+def check_accuracy(model, model_name, loader, device, precip=False, bias=False):
+    loss_list, monthly_bias = [], []
+    sel_out, sel_y, sel_t = [], [], []
+    rand_months = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
+    sel_months = [1, 4, 15, 23]
+
+    extent = (-108, -84.25, 24, 47.75)
+    lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
+
+    model = model.to(device)
     model.eval()
     with torch.no_grad():
         for i, (x, y, t_str) in enumerate(loader):
             print(f'Testing model on {t_str}...')
-            x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU -> may need to specify dtype here..?
+            x = x.to(device=device, dtype=torch.float32)
             y = y.to(device=device, dtype=torch.float32)
             output = model(x)
-            # recall these are values for one month of data!
-            loss = F.mse_loss(output, y)  # this should be one value as mean mse for all days in the month..
+            loss = F.mse_loss(output, y)  # this should be one value as mean mse for all days in the month
             loss_list.append(loss.detach().cpu())
-            # rmse = torch.sqrt(mse)
 
-            if i in rand_months:
-                sel_dates = torch.randint(output.shape[0], (3,)).tolist()
-                out_sel, y_sel = output[sel_dates].squeeze(1), y[sel_dates].squeeze(1)
-                # so these are now (B, 1, 96, 96) -> (len(sel_dates), 96, 96)
-                outs = list(torch.split(out_sel, 1, dim=0))
-                ys = list(torch.split(y_sel, 1, dim=0))
-                outs = [im.squeeze(0).numpy(force=True) for im in outs]
-                ys = [im.squeeze(0).numpy(force=True) for im in ys]
-                datas, rmses, pccs = [], [], []
-                for j in range(len(outs)):
-                    datas.append(outs[j])
-                    datas.append(ys[j])
-                    rmses.append(rmse(outs[j], ys[j]))
-                    pccs.append(pcc(outs[j], ys[j]))
-                
-                fig, axs = plt.subplots(3, 2, subplot_kw={'projection': ccrs.PlateCarree()})
-                axs = axs.flatten()
-                fig.suptitle(f'Predicted vs. Observed Data on {t_str}: {model_name}')
-                for i, (ax, data) in enumerate(zip(axs, datas)):
-                    cs = ax.contourf(lons, lats, data, lvls, transform=ccrs.PlateCarree(), cmap=cmap, extend='max')
-                    ax.set_extent(extent, crs=ccrs.Geodetic())
-                    ax.add_feature(cfeat.STATES)
-                    if i == 0:
-                        ax.set_title(f'Predicted, RMSE: {rmses[0]:.3f}, PCC: {pccs[0]:.3f}', fontsize=6)
-                    if i == 1: 
-                        ax.set_title('Observed', fontsize=6)
-                    if i % 2 == 0:
-                        ax.set_title(f'RMSE: {rmses[i // 2]:.3f}, PCC: {pccs[i // 2]:.3f}', fontsize=6)
-
-                fig.colorbar(cs, ax=axs, orientation='vertical', fraction=0.1, label='Accumulated Precip [mm]')
-                img_fname = f'{t_str}_sel.png'
-                img_path = os.path.join(f'./models/{model_name}/', img_fname)
-                plt.savefig(img_path, dpi=300, bbox_inches='tight')
+            if bias:
+                b = calc_daily_bias(output, y)
+                monthly_bias.append(b)
+            if precip and i in sel_months:
+                sel_out.append(output)
+                sel_y.append(y)
+                sel_t.append(t_str)
 
         mean_loss = np.mean(loss_list)
         print(f'Mean MSE loss on test set: {mean_loss}')
-    return
+        if precip:
+            plot_precip(sel_out, sel_y, sel_t, extent, (lons, lats), model_name)
+        elif bias:
+            plot_bias(monthly_bias, extent, (lons, lats), model_name)
 
 # ---------------------------------------------------------------------------------
 class Trainer:
-    def __init__(self, model, model_name, train_loader, val_loader, optimizer, device, save_every=5):
+    def __init__(self, model, model_name, train_loader, val_loader, optimizer, device, n_epochs, save_every=5):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer
-        self.scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, [5, 100, 130], gamma=0.5)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=1e-4, epochs=n_epochs, steps_per_epoch=len(train_loader))
         self.device = device
+        self.n_epochs = n_epochs
         self.save_every = save_every
         self.model_path = f'./models/{model_name}/'
         self.train_llist = []
@@ -224,17 +327,19 @@ class Trainer:
         self._ctr = 0
 
     def _best_loss(self):
-        print(f'min train loss: {np.amin(self.train_llist)} @ epoch {np.argmin(self.train_llist)}')
-        print(f'min val loss: {np.amin(self.val_llist)} @ epoch {np.argmin(self.val_llist)}')
+        print(self.train_llist)
+        print(self.val_llist)
+        print(f'min train loss: {np.amin(self.train_llist)} @ epoch {np.argmin(self.train_llist) + 1}')
+        print(f'min val loss: {np.amin(self.val_llist)} @ epoch {np.argmin(self.val_llist) + 1}')
 
     def _plot_loss(self):
         fig, ax = plt.subplots(1, 1)
         ax.plot(np.arange(len(self.train_llist)), self.train_llist, label='train loss')
         ax.plot(np.arange(len(self.val_llist)), self.val_llist, label='val loss')
-        ax.set(xlabel='epoch', ylabel='loss', ylim=(0, 1.1 * np.amax(self.train_llist)))
+        ax.set(xlabel='epoch', ylabel='loss', ylim=(0, 2 * np.amax(self.train_llist)))
         plt.legend()
         fig.tight_layout()
-        sv_pth = os.path.join(self.model_path, 'loss.png')
+        sv_pth = os.path.join(self.model_path, 'loss_dpr.png')
         plt.savefig(sv_pth, dpi=300.0)
 
     def _run_batch(self, source, target):
@@ -242,14 +347,15 @@ class Trainer:
         out = self.model(source)
         # how can we penalize negative predictions?
         # this from https://stackoverflow.com/questions/50711530/what-would-be-a-good-loss-function-to-penalize-the-magnitude-and-sign-difference
-        loss = F.mse_loss(out, target, reduction='sum') + torch.sum(F.relu(-1 * out))
+        # switching these back to mean reduction?
+        loss = F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
         loss.backward()
         self.optimizer.step()
         return loss.item()
 
     def _run_val_batch(self, source, target):
         out = self.model(source)
-        val_loss = F.mse_loss(out, target, reduction='sum') + torch.sum(F.relu(-1 * out))
+        val_loss = F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
         return val_loss.cpu().detach().numpy()
 
     def _run_epoch(self, epoch, save):
@@ -264,6 +370,8 @@ class Trainer:
             target = target.to(self.device, dtype=torch.float32)
             train_loss = self._run_batch(source, target)
             e_loss.append(train_loss)
+            #print(self.scheduler.get_last_lr())
+            self.scheduler.step()  # for OneCycle scheduler
         
         e_val_loss = []
         self.model.eval()
@@ -282,7 +390,7 @@ class Trainer:
 
     def _save_point(self, epoch):
         state = self.model.state_dict()
-        sv_pth = os.path.join(self.model_path, 'params.pth')
+        sv_pth = os.path.join(self.model_path, 'params_dpr.pth')
         torch.save(state, sv_pth)
         print(f'Model state saved at epoch {epoch}')
 
@@ -299,18 +407,18 @@ class Trainer:
         else:
             return False
 
-    def train(self, max_epochs, search=False):
-        for epoch in range(1, max_epochs + 1):
+    def train(self, search=False):
+        for epoch in range(1, self.n_epochs + 1):
             save = (epoch % self.save_every == 0)
             self._run_epoch(epoch, save)
             t_loss = self.train_llist[-1]
             v_loss = self.val_llist[-1]
-
+            print(f'Epoch {epoch} | Train loss: {t_loss}, Val loss: {v_loss}')
+            print()
+            
             if v_loss == np.min(self.val_llist):
                 self._save_point(epoch)
-                print(f'Epoch {epoch} | Train loss: {t_loss}, Val loss: {v_loss}')
-                print()
-            self.scheduler.step()
+            #self.scheduler.step()
             if epoch > 1:
                 if self._stop_early:
                     print(f'No improvement for 10 epochs, stopping now at epoch {epoch}')

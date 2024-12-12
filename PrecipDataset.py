@@ -17,31 +17,29 @@ class PrecipDataset(Dataset):
     def __init__(self, mode):
         """
         ERA5 filenames: {var}.{YYYY}{MM}.nc
-        MSWEP filenames: {YYYY}{DDD}.{HH}.nc, DDD = [001...366], HH = [00, 03, 06, 09, 12, 15, 18, 21], assuming includes leap years..?
-          -> if dealing with leap years then ensure both ERA and MSWEP have the same data somehow
+        MSWEP filenames: {YYYY}{DDD}.{HH}.nc, DDD = [001...366], HH = [00, 03, 06, 09, 12, 15, 18, 21]
 
-        ERA data (4x daily data at 1.5 degree grid) Zhang et al. use 0.25 deg.? need to upsample?
+        ERA data (4x daily data at 1.5 degree grid)
 
         data @ 38 pressure levels (potentially 304 channels)
           potential vorticity (PV)
           relative vorticity (VO)
           temperature (T)
-          specific humidity (Q)  ... missing Q data for 80s 90s.? others? just use 2000+ then?
+          specific humidity (Q)
           zonal winds (U)
           meridional winds (V)
           vertical winds (W)
           geopotential (Z)
 
-        surface (??) data (potentially 6 additional layers)
-          U, V, Q, Z, T, P (this SLP?)
-
         MSWEP data (8x daily data at .1 degree grid)
         """
         super(PrecipDataset, self).__init__()
         if mode == 'train':
-            self.years = [2001, 2002, 2004, 2005, 2006, 2008, 2009, 2010, 2011, 2012, 2014, 2015, 2016, 2017, 2019, 2020]
+            #self.years = [2001]
+            self.years = [2001, 2002, 2004, 2005, 2006, 2008, 2009, 2010, 2012, 2014, 2015, 2016, 2017, 2019, 2020]
         elif mode == 'val':
-            self.years = [2007, 2018]
+            #self.years = [2007]
+            self.years = [2007, 2011, 2018]
         elif mode == 'test':
             self.years = [2003, 2013]
 

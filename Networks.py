@@ -11,9 +11,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torchinfo import summary
 import matplotlib.pyplot as plt
 import xarray as xr
 import os
+
+def main():
+    aunet = AttentionUNet(64)
+    shape = (120, 64, 96, 96)
+    summary(aunet, input_size=shape)
 
 class CNN(nn.Module):
   def __init__(self, in_dim, hidden_dim=256, depth=5):
@@ -113,11 +119,6 @@ class UNet(nn.Module):
     out = self.final(x)
     return out
 
-# test for correct dimensions and mem usage
-test_in = torch.zeros((1, 64, 96, 96))
-net = UNet(64)
-net(test_in)
-
 class Attention2D(nn.Module):
   def __init__(self, dwn_channels, up_channels, int_channels):
     """
@@ -190,15 +191,9 @@ class AttentionUNet(nn.Module):
     out = self.final(x)
     return out
 
-# test for correct dimensions and mem usage
-test_in = torch.zeros((1, 64, 96, 96))
-net = AttentionUNet(64)
-net(test_in)
-
 class CAEEncoder(nn.Module):
   def __init__(self, in_size, out_size):
     super(CAEEncoder, self).__init__()
-    # TODO: add Inception blocks -> need to sort out all those input params
     self.net = nn.Sequential(
         nn.Conv2d(in_size, out_size, kernel_size=3, padding=1),
         nn.LazyBatchNorm2d(),
@@ -235,10 +230,10 @@ class CAE_LSTM(nn.Module):
     unflat_shape = (1024, 3, 3)
     self.unflat = nn.Unflatten(1, unflat_shape)  # should give (B, 128, 6, 6)
     self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-    self.linear1 = nn.LazyLinear(lin_out1)
+    self.linear1 = nn.Sequential(nn.LazyLinear(lin_out1), nn.ReLU(), nn.Dropout(p=0.5))
     # how exactly should we handle this? want batch TO BE the sequence length.. right?
-    self.lstm = nn.LSTM(lin_out1, hidden_size, bias=False, batch_first=True, dropout=0.0)  # TODO: define
-    self.linear2 = nn.LazyLinear(lin_out2)
+    self.lstm = nn.LSTM(lin_out1, hidden_size, bias=False, dropout=0.0)
+    self.linear2 = nn.Sequential(nn.LazyLinear(lin_out2), nn.ReLU(), nn.Dropout(p=0.5))
     self.final = nn.LazyConv2d(1, kernel_size=3, padding=1)
     start_pwr = 6  # first conv should be 128 channels
     self.down = build_down_path(CAEEncoder, in_size, start_pwr, depth)
@@ -254,10 +249,10 @@ class CAE_LSTM(nn.Module):
 
     # linear
     x = self.flat(x)  # (B, C * H * W)
-    x = self.linear1(x)  # need size (B, L, input_size) for batch size B, sequence length L, input features input_size
+    x = self.linear1(x)
     # lstm
-    # need to rework sequence len stuff is this right..? should get 3dim tensor not 2
-    x, _ = self.lstm(x)  # TODO: add attention! if using 1 layer probably don't need custom
+    hidden_state = None
+    x, hidden_state = self.lstm(x, hidden_state)
     # linear
     x = self.linear2(x)
     x = self.unflat(x)
@@ -270,7 +265,6 @@ class CAE_LSTM(nn.Module):
 
     return out
 
-test = torch.zeros((2, 64, 96, 96))
-net = CAE_LSTM(64)
-net(test)
+if __name__ == '__main__':
+    main()
 
