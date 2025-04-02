@@ -1,111 +1,196 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import torch.optim as optim
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+# import init_process_group, destroy_process_group, all_gather, all_reduce, ReduceOp.SUM, is_initialized, new_group, barrier
+from socket import gethostname
+import numpy as np
+from datetime import timedelta
+from argparse import ArgumentParser
+import os
+import sys
+sys.path.append('/home/eastinev/AI')
+import time
+from TrainHelper import TrainHelper
+from InceptUNet3D import IRNv4_3DUNet
+from PrecipDataset import PrecipDataset
 
+# =================================================================================
 def main():
-    pass
+    parser = ArgumentParser()
+    parser.add_argument('model_name', type=str)
+    parser.add_argument('mode', type=str)
+    parser.add_argument('n_epochs', type=int)
+    parser.add_argument('-r', '--rmvar', type=str)
+    parser.add_argument('-z', '--zero', action='store_true')
+    parser.add_argument('-p', '--precip', action='store_true')
+    parser.add_argument('-b', '--bias', action='store_true')
+    parser.add_argument('-s', '--search', action='store_true')
+    parser.add_argument('-t', '--timeit', action='store_true')
+    parser.add_argument('-d', '--ddp', action='store_true')
+    parser.add_argument('-op', '--optimparams', type=str)
+    parser.add_argument('-e', '--exp', type=str)
+    parser.add_argument('-sn', '--season', type=str)
+    args = parser.parse_args()
 
-## DDP stuff
-# ---------------------------------------------------------------------------------
-def run(rank, world_size, model_name, save_every, total_epochs):
-    #try:
-    ddp_setup(rank, world_size)
-    print(f'Rank {rank} setup')
-    model, optimizer = prep_objects(model_name, 64)  # worth not hard coding this?
-    print(f'Rank {rank} model, optimizer setup')
-    loader = prep_loader()
-    print(f'Rank {rank} loader setup')
-    trainer = Trainer(model, model_name, loader, optimizer, rank, world_size, save_every)
-    print(f'Rank {rank} trainer setup')
-    trainer.train(total_epochs)
-    destroy_process_group()
-    #except Exception as e:
-    #    print(f'GPU {rank} encountered error {e}')
-    #    destroy_process_group()
+    model_name, mode, n_epochs, ddp = args.model_name, args.mode, args.n_epochs, args.ddp
+    rm_var, zero = args.rmvar, args.zero
+    exp, season = args.exp, args.season
+    op = args.optimparams.split(':')
+    lr, wd = float(op[0]), float(op[1])
+    # TODO: what about removing vertical shear? set all to..? average of midlevel?
+    note = 'ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
+    weekly = False
 
-# ---------------------------------------------------------------------------------
-def ddp_setup(rank, world_size):
-    """
-    rank (int): unique ID for each process
-    world_size (int): total number of processes
-    """
-    # os.environ['MASTER_ADDR'] = 'g009'  # is this right.. check slurm thing from torch examples
-    os.environ['MASTER_PORT'] = '23345'
-    # print(f'Rank {rank} setting device')
-    torch.cuda.set_device(rank)
-    # print(f'Rank {rank} init_process_group')
-    init_process_group(backend='nccl', rank=rank, world_size=world_size)
+    if ddp:
+        # TODO: does this work as its own function?
+        rank = int(os.environ['SLURM_PROCID'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
+        assert gpus_per_node == torch.cuda.device_count()
+        print(f'Rank {rank} of {world_size} on {gethostname()} which has {gpus_per_node} allocated GPUs per node', flush=True)
 
-# ---------------------------------------------------------------------------------
-class DDPTrainer:
-    def __init__(self, model, model_name, loader, optimizer, gpu_id, world_size, save_every):
-        self.gpu_id = gpu_id
-        # this the right place for this? why doesn't DDP wrap self.model?
-        self.model = nn.SyncBatchNorm.convert_sync_batchnorm(model.to(gpu_id))
-        self.model = DDP(model, device_ids=[gpu_id])
-        self.loader = loader
-        self.optimizer = optimizer
-        self.world_size = world_size
-        self.save_every = save_every
-        self.model_path = f'./models/{model_name}/'
-        self.loss_list = []
+        dist.init_process_group('nccl', rank=rank, world_size=world_size, timeout=timedelta(minutes=2))
+        if rank == 0: print(f'Init?: {dist.is_initialized()}', flush=True)
+        local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+        torch.cuda.set_device(local_rank)
+    else:
+        rank = 0  # this so we can use the conditionals below
+        local_rank = torch.device('cuda')
 
-    def _plot_loss(self):
-        fig, ax = plt.subplots()
-        ax.plot(np.arange(len(self.loss_list)), self.loss_list, label='train loss')
-        ax.set(xlabel='epoch', ylabel='loss')
-        plt.legend()
-        sv_pth = os.path.join(self.model_path, 'loss.png')
-        plt.savefig(sv_pth, dpi=300.0)
+    model = IRNv4_3DUNet(6, depth=35, Na=1, Nb=2, Nc=1, drop_p=0.3).to(local_rank)
+    if ddp: model = DDP(model, device_ids=[local_rank])
+
+    optimizer = prep_optimizer(model, lr, wd)
+    sched1 = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=10)
+    sched2 = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs - 10, eta_min=1e-5)
+    scheduler = optim.lr_scheduler.SequentialLR(optimizer, schedulers=[sched1, sched2], milestones=[10])
+    train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
+    loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
     
-    def _run_batch(self, source, target, collect_loss=False):
-        self.optimizer.zero_grad()
-        out = self.model(source)
-        loss = F.mse_loss(out, target)
-        # would be careful about where collect_loss is
-        # before .backward() vs. before optimizer.step() maybe different?
-        # sounds like should be before optimizer.step()?
-        loss.backward()
-        
-        # collect loss for plotting (?) need loss.item() for these?
-        if collect_loss:
-            all_loss = [torch.zeros_like(loss) for _ in range(self.world_size)]
-            all_gather(all_loss, loss)
-            if self.gpu_id == 0:
-                print(f'Collecting loss...')
-                self.loss_list.append(torch.mean(torch.stack(all_loss)).cpu())
-        
-        self.optimizer.step()
+    if rank == 0: helper = TrainHelper(model_name, tag=season)
+    if ddp: cpu_grp = dist.new_group(backend='gloo')
+    if ddp: dist.barrier()
+    stop_signal = torch.tensor([0], dtype=torch.int) 
 
-    def _run_epoch(self, epoch, save):
-        # not sure if this is needed, something re: shuffling if we care
-        # self.loader.sampler.set_epoch(epoch)
-        print(f'[GPU {self.gpu_id}] Epoch {epoch} | Steps: {len(self.loader)}')  # does this split it up auto?
-        for i, (source, target, t_str) in enumerate(self.loader):
-            # TODO: either stick with removing whole month 2020-12 or strip last day of each?
-            if source.shape[0] != target.shape[0]:
-                print(f'Skipping {t_str}, source/target shapes do not match!')
-                continue
-            source = source.to(self.gpu_id)
-            target = target.to(self.gpu_id)
-            collect_loss = (i == (len(self.loader) - 1))
-            self._run_batch(source, target, collect_loss)
+    try:
+        t1 = time.time()
+        for epoch in range(1, n_epochs + 1):
+            if ddp: sampler.set_epoch(epoch)
+            l = train(model, local_rank, train_loader, optimizer, epoch)
+            if ddp:
+                all_loss = [torch.zeros_like(l, device=torch.device('cpu')) for _ in range(world_size)]
+                dist.all_gather(all_loss, l, group=cpu_grp)
+                if rank == 0:
+                    # TODO: worth splitting this guy across multiple GPUs too? need drop_last=True so no repeats 
+                    # barrier here for validation?
+                    val_loss = validate(model, local_rank, val_loader)
+                    train_loss = torch.sum(torch.tensor(all_loss)) / loader_len
+            else:
+                val_loss = validate(model, local_rank, val_loader)
+                train_loss = l / loader_len
+            scheduler.step()
 
-    def _save_point(self, epoch):
-        state = self.model.module.state_dict()
-        sv_pth = os.path.join(self.model_path, 'params.pth')
-        torch.save(state, sv_pth)
-        print(f'Model state saved at epoch {epoch}')
+            if ddp: dist.barrier()  # make sure all training in epoch is done before saving
+            if rank == 0:  # this should work for dpp or not
+                helper.add(train_loss, val_loss)
+                helper.print(epoch)
+                stop_signal = helper.checkpoint(model.module, epoch)  # this.. will not work if not ddp yes? same w/validate()
 
-    def train(self, max_epochs):
-        for epoch in range(max_epochs):
-            save = ((epoch + 1) % self.save_every == 0)
-            self._run_epoch(epoch, save)
-            if self.gpu_id == 0 and save:
-                self._save_point(epoch)
-                print(f'Epoch {epoch} | MSE loss: {self.loss_list[-1]}')
-                print()
-        print('Run completed.')
-        self._plot_loss()
+            if ddp: dist.barrier()  # make sure to not move forward with training while saving in rank0
 
+            dist.all_reduce(stop_signal, op=dist.ReduceOp.SUM, group=cpu_grp)
+            if stop_signal.item() > 0:
+                print(f'Stopping at epoch {epoch}', flush=True) # will this work or error out
+                break
+
+        # this work right?
+        if rank > 0: exit(0)
+
+        t2 = time.time()
+        print(f'Run completed in {t2 - t1}', flush=True)
+
+    except Exception as e:
+        print(f'[ERROR]: {local_rank} @ {time.time()} -- {e}')
+    finally:
+        if rank == 0: helper.plot_loss()
+        cleanup(ddp)
+
+# =================================================================================
+def train(model, device, train_loader, optimizer, epoch):
+    try:
+        train_loss = 0
+        model.train()
+        # print(device, 'train start', time.time(), flush=True)
+        for i, (source, target, _) in enumerate(train_loader):
+            source, target = source.to(device), target.to(device)
+            optimizer.zero_grad()
+            out = model(source)
+            loss = F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
+            train_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+
+        # print(device, 'train end', time.time(), flush=True)
+        return torch.tensor(train_loss) 
+    except Exception as e:
+        print(f'[ERROR]: {device} @ {time.time()} -- {e}', flush=True)
+        return
+
+# ---------------------------------------------------------------------------------
+def validate(model, device, val_loader):
+    try:
+        # print(device, 'val start', time.time(), flush=True)
+        vloss = 0
+        model.eval()
+        with torch.no_grad():
+            for i, (source, target, _) in enumerate(val_loader):
+                source, target = source.to(device), target.to(device)
+                out = model.module(source)
+                loss = F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
+                vloss += loss.item()
+
+        # print(device, 'val end', time.time(), flush=True)
+        vloss /= len(val_loader.dataset)
+        return vloss
+    except Exception as e:
+        print(f'[ERROR]: {device} @ {time.time()} -- {e}', flush=True)
+        return
+
+# ---------------------------------------------------------------------------------
+def prep_optimizer(model, lr=1e-4, wd=1e-2):
+    # might we want different optimizer 
+    # what about lr? with distributed training seen debates on scaling this
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)  # use default betas?
+
+    return optimizer
+
+# ---------------------------------------------------------------------------------
+def prep_loaders(exp, season, rank, world_size, weekly=False, ddp=False):
+    n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
+    
+    train_ds = PrecipDataset('train', exp, season, weekly=weekly)
+    val_ds = PrecipDataset('val', exp, season, weekly=weekly)
+
+    sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None
+    
+    train_loader = DataLoader(train_ds, batch_size=None, sampler=sampler, num_workers=n_workers)
+    val_loader = DataLoader(val_ds, batch_size=None, num_workers=n_workers)
+
+    return train_loader, val_loader, sampler
+
+# ---------------------------------------------------------------------------------
+def cleanup(ddp):
+    if ddp:
+        dist.destroy_process_group()
+    else:
+        pass  # anything we need here?
+
+# =================================================================================
 if __name__ == '__main__':
     main()
 
