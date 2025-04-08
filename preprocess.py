@@ -78,10 +78,10 @@ class MakeMonthly:
         self.dpm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
         # TODO: my god this is ugly... better way?
         self.splits = {
-            31: [slice(0, 8), slice(8, 16), slice(16, 24), slice(24, 31)],
-            30: [slice(0, 8), slice(8, 16), slice(16, 23), slice(23, 30)],
-            29: [slice(0, 8), slice(8, 15), slice(15, 22), slice(22, 29)],
-            28: [slice(0, 7), slice(7, 14), slice(14, 21), slice(21, 28)]
+            31: [slice(0, 64), slice(64, 128), slice(128, 192), slice(192, 248)],
+            30: [slice(0, 64), slice(64, 128), slice(128, 184), slice(184, 240)],
+            29: [slice(0, 64), slice(64, 120), slice(120, 176), slice(176, 232)],
+            28: [slice(0, 56), slice(56, 112), slice(112, 168), slice(168, 224)]
         }
 
         self.era_vars = ['Q', 'T', 'U', 'V', 'Z', 'W', 'VO', 'PV']  # these are original 8
@@ -138,46 +138,33 @@ class MakeMonthly:
 
     def reprocess(self, year, month):
         fbase = f'{year}{str(month + 1).zfill(2)}'
+        
+        existing = os.listdir(os.path.join(pth.SCRATCH, self.exp))
         fnames = [os.path.join(pth.SCRATCH, self.exp, f'Cfill.{fbase}_{i}.nc') for i in range(4)]
         fs = ' '.join(fnames)        
-        outf = os.path.join(pth.SCRATCH, self.exp, f'C.{fbase}.nc')
-        if outf not in os.listdir(os.path.join(pth.SCRATCH, self.exp)):
-            self.cdo.mergetime(input=fs, output=outf)
-    
-        for f in fnames:
-            os.remove(f)
+        inf = os.path.join(pth.SCRATCH, self.exp, f'C.{fbase}.nc')
+        if inf.split('/')[-1] in existing:
+            ds = xr.open_dataset(inf, chunks='auto')
+            ndays = len(ds.time) // 8
+            splits = self.splits[ndays]
+            for i, f in enumerate(fnames):
+                t_slc = splits[i]
+                ds.isel(time=t_slc).to_netcdf(f)
+            
+            os.remove(inf)
         
         fnames = [os.path.join(pth.SCRATCH, self.exp, f'P.{fbase}_{i}.nc') for i in range(4)]
         fs = ' '.join(fnames)        
-        outf = os.path.join(pth.SCRATCH, self.exp, f'P.{fbase}.nc')
-        self.cdo.mergetime(input=f'[ -sellonlatbox,{self.mswep_bbox} : {fs} ]', output=outf)
-        
-        for f in fnames:
-            os.remove(f)
-        
-        return
-        # ofnames = [f'Cfill.{year}{str(month + 1).zfill(2)}_{i}.nc' for i in range(4)]
-
-        for f, outf in zip(fnames, ofnames):
-            if outf in os.listdir(os.path.join(pth.SCRATCH, self.exp)):
-                continue
-            fpath = os.path.join(pth.SCRATCH, self.exp, f)
-            ofpath = os.path.join(pth.SCRATCH, self.exp, outf)
+        inf = os.path.join(pth.SCRATCH, self.exp, f'P.{fbase}.nc')
+        if inf.split('/')[-1] in existing:
+            ds = xr.open_dataset(inf, chunks='auto')
+            ndays = len(ds.time) // 8
+            splits = self.splits[ndays]
+            for i, f in enumerate(fnames):
+                t_slc = splits[i]
+                ds.isel(time=t_slc).to_netcdf(f)
             
-            # resize mswep/precip to smaller region
-            # combine back to monthly
-
-            # fill nans -- this a couple seconds faster than pure cdo?
-            """
-            ds = xr.open_dataset(fpath, chunks='auto')
-            ds1 = self.cdo.setmisstonn(input=ds[['T', 'H']], returnXDataset=True)
-            ds2 = self.cdo.setmisstoc(0.0, input=ds[['U', 'V', 'OMEGA', 'QV']], returnXDataset=True)
-            ds = xr.combine_by_coords([ds1, ds2], combine_attrs='drop_conflicts')
-            ds.to_netcdf(ofpath)
-            """
-
-            # remove some vars and plevels
-            # self.cdo.selname(f'{self.merra_vars}', input=f'-sellevel,{self.p} {fpath}', output=ofpath) 
+            os.remove(inf)
 
     def get_merra_t_str(self, year, month):
         # fname: MERRA2_N00.inst3_3d_asm_Np.YYYYMMDD.nc4

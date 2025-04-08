@@ -2,18 +2,22 @@ import torch
 from torch.utils.data import Dataset
 from dask import array
 import xarray as xr
+import numpy as np
 import os
 import sys
 sys.path.append('/home/eastinev/AI')
 import paths as pth
 import time
+import matplotlib.pyplot as plt
 
 DEEP = True
+STATS = False
+NORM = True
 
 def main():
     t1 = time.time()
-    pd = PrecipDataset('train', 'inc3d_reana', season='spr', weekly=False)
-    source, target, t_str = pd.__getitem__(4)
+    pd = PrecipDataset('train', 'inc3d_reana', season='both', weekly=True)
+    source, target, t_str = pd.__getitem__(20)
     t2 = time.time()
     print(t2 - t1)
 
@@ -48,8 +52,26 @@ class PrecipDataset(Dataset):
         self.weekly = weekly
         self.rm_var = rm_var
         self.zero = zero
+        self.vars = ['QV', 'T', 'U', 'V', 'OMEGA', 'H']
         # these are for original version (Zhang)
         self.p = [1000., 850., 700., 500., 200., 100., 50., 10.]
+        self._stats = {
+            'QVmin': [], 'QVmax': [], 'QVmn': [], 'QVstd': [],
+            'Tmin': [], 'Tmax': [], 'Tmn': [], 'Tstd': [],
+            'Umin': [], 'Umax': [], 'Umn': [], 'Ustd': [],
+            'Vmin': [], 'Vmax': [], 'Vmn': [], 'Vstd': [],
+            'OMEGAmin': [], 'OMEGAmax': [], 'OMEGAmn': [], 'OMEGAstd': [],
+            'Hmin': [], 'Hmax': [], 'Hmn': [], 'Hstd': [],
+        }
+
+        self.stats = {
+            'QVmn': 2.5e-3, 'QVstd': 3.805e-3,
+            'Tmn': 254.721, 'Tstd': 29.036,
+            'Umn': 1.9595, 'Ustd': 12.815,
+            'Vmn': 0.05778, 'Vstd': 7.1185,
+            'OMEGAmn': 2.445e-3, 'OMEGAstd': 0.1325,
+            'Hmn': 11833.999, 'Hstd': 12124.793,
+        }
 
         # filesystem locations
         # TODO: handle these for mswep/merra/am4 precip as target?
@@ -81,6 +103,7 @@ class PrecipDataset(Dataset):
             month = month_off + (idx % self.n_months)  # idx % 12
 
         # TODO: quick fix for model changes 
+        """
         srcs, trgts = [], []
         for i in range(4):
             t_str = self.get_t_str(year, month, week=i)
@@ -89,7 +112,9 @@ class PrecipDataset(Dataset):
         source = torch.cat(srcs, dim=0)
         target = torch.cat(trgts, dim=0)
         # print(source.shape, target.shape)
-
+        """
+        t_str = self.get_t_str(year, month, week=week)
+        source, target = self.get_source(t_str), self.get_target(t_str)
         if source.shape[0] != target.shape[0]:
             source, target = self.prune(source, target)
         sample = (source, target, t_str)
@@ -107,6 +132,12 @@ class PrecipDataset(Dataset):
         t_str = year + month.zfill(2)
         t_str += f'_{week}' if week is not None else ''
         return t_str
+
+    def get_stats(self):
+        for v in self.vars:
+            vm, vs = np.mean(self._stats[v + 'mn']), np.mean(self._stats[v + 'std'])
+            mx, mn = np.amax(self._stats[v + 'max']), np.amin(self._stats[v + 'min'])
+            print(f'Variable {v}: mean {vm} std {vs} max {mx} min {mn}')
 
     def _rm_var(self, dataset):
         # set variable to average value at each pressure-height.?
@@ -127,6 +158,19 @@ class PrecipDataset(Dataset):
         if self.rm_var is not None:
             ds = self._rm_var(ds)
 
+        if STATS:
+            for v in self.vars:
+                dav = ds[v]
+                self._stats[v + 'max'].append(dav.max().data)
+                self._stats[v + 'min'].append(dav.min().data)
+                self._stats[v + 'mn'].append(dav.mean().data)
+                self._stats[v + 'std'].append(dav.std().data)
+            return
+
+        if NORM:
+            for v in self.vars:
+                ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
+        
         da = ds.to_dataarray()
         # straight reshaping of data array not equivalent.. wonder if there is a way tho this is ~ 4x slower
         # ok well is this not equivalent? check second row again it should be fine use permute not reshape
@@ -144,6 +188,7 @@ class PrecipDataset(Dataset):
         f = os.path.join(self.target_dir, 'P.' + t_str + '.nc')
         target = torch.tensor(xr.load_dataset(f).to_dataarray().data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
         return target
+
 
 if __name__ == '__main__':
     main()

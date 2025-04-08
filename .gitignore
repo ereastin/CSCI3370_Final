@@ -2,3 +2,5 @@ __pycache__/*
 _logs/*
 models/*
 *.sl
+*.png
+scratch.py

@@ -5,7 +5,7 @@ from torchinfo import summary
 
 def main():
     net = IRNv4UNet(64)
-    summary(net, input_size=(120, 64, 96, 96))  # ~ 20GB forward/back passes.. how much do we have??
+    summary(net, input_size=(64, 96, 80, 144))
 
 # ---------------------------------------------------------------------------------
 class S1(nn.Module):
@@ -347,14 +347,17 @@ class IRNv4UNet(nn.Module):
       x = step(x)
       if i in [0, 2, 3 + self.Na, 3 + self.Na + 1 + self.Nb]:
         outs.append(x)
+      print(step, x.shape)
 
     ctr = 0
     for j, step in enumerate(self.net_up):
       if (j + 1) % 2 == 0:
         ctr += 1
         x = step(x, outs[-ctr])
+        print(step, x.shape, outs[-ctr].shape)
       else:
         x = step(x)
+        print(step, x.shape)
 
     return self.final(x)
 
