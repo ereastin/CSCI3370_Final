@@ -39,7 +39,7 @@ def main():
     else:
         try:
             # preprocess merra
-            mm.get_merra(year, month)
+            #mm.get_merra(year, month)
             # preprocess mswep data
             mm.get_mswep(year, month, six_hourly=False)
             # preprocess era data
@@ -78,10 +78,10 @@ class MakeMonthly:
         self.dpm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
         # TODO: my god this is ugly... better way?
         self.splits = {
-            31: [slice(0, 64), slice(64, 128), slice(128, 192), slice(192, 248)],
-            30: [slice(0, 64), slice(64, 128), slice(128, 184), slice(184, 240)],
-            29: [slice(0, 64), slice(64, 120), slice(120, 176), slice(176, 232)],
-            28: [slice(0, 56), slice(56, 112), slice(112, 168), slice(168, 224)]
+            31: [slice(0, 8), slice(8, 16), slice(16, 24), slice(24, 31)], #[slice(0, 64), slice(64, 128), slice(128, 192), slice(192, 248)],
+            30: [slice(0, 8), slice(8, 16), slice(16, 23), slice(23, 30)], #[slice(0, 64), slice(64, 128), slice(128, 184), slice(184, 240)],
+            29: [slice(0, 8), slice(8, 15), slice(15, 22), slice(22, 29)], #[slice(0, 64), slice(64, 120), slice(120, 176), slice(176, 232)],
+            28: [slice(0, 7), slice(7, 14), slice(14, 21), slice(21, 28)], #[slice(0, 56), slice(56, 112), slice(112, 168), slice(168, 224)]
         }
 
         self.era_vars = ['Q', 'T', 'U', 'V', 'Z', 'W', 'VO', 'PV']  # these are original 8
@@ -241,13 +241,12 @@ class MakeMonthly:
         self.cdo.remap(
             self.gfile,
             self.mswep_wts,
-            input=f'-mergetime -apply,-sellonlatbox,{self.bbox} [ {infiles} ]',
+            input=f'-mergetime [ -sellonlatbox,{self.bbox} : {infiles} ]',
             output=outfile
         )
 
     def get_mswep(self, year, month, six_hourly=False):
         infiles, outfile = self.get_mswep_files(year, month)
-
         if six_hourly:
             # TODO: if moving to 6-hourly and weekly chunks this needs an update
             t_strt = '00:00:00'  # combining month will always start at 00:00:00

@@ -64,7 +64,7 @@ def prep_model(model_name, in_channels=64):
         case 'inc':
             return IRNv4UNet(in_channels)
         case 'inc3d':
-            return IRNv4_3DUNet(in_channels, depth=35, Na=1, Nb=2, Nc=1, drop_p=0.3)
+            return IRNv4_3DUNet(in_channels, depth=35, Na=1, Nb=1, Nc=1, base=32, bias=False, lin_act=0.05)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
@@ -92,9 +92,11 @@ def check_accuracy(model, model_name, loader, device, note='', precip=False, bia
     rand_months = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
     sel_months = rand_months # [1, 4, 15, 23]
 
-    extent = (-140, -50.625, 14, 53.5)
+    #extent = (-140, -50.625, 14, 53.5)
+    extent = (-98.125, -89.375, 31, 52)
     dlon, dlat = 0.625, 0.5
-    lons, lats = np.arange(-140, -50.625 + dlon, dlon), np.arange(14, 53.5 + dlat, dlat)
+    # lons, lats = np.arange(-140, -50.625 + dlon, dlon), np.arange(14, 53.5 + dlat, dlat)
+    lons, lats = np.arange(-98.125, -89.375 + dlon, dlon), np.arange(31, 52 + dlat, dlat)
     # for zhang_repr
     # extent = (-108, -84.25, 24, 47.75)
     # lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)

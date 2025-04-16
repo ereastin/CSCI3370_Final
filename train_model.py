@@ -17,6 +17,7 @@ import time
 from TrainHelper import TrainHelper
 from InceptUNet3D import IRNv4_3DUNet
 from Incept3D import IRNv4_3D
+from InceptUNet import IRNv4UNet
 from PrecipDataset import PrecipDataset
 
 # =================================================================================
@@ -42,7 +43,7 @@ def main():
         lr, wd = float(op[0]), float(op[1])
     # TODO: what about removing vertical shear? set all to..? average of midlevel?
     note = 'ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
-    weekly = True
+    weekly = False
     print(f'Job ID: {os.environ["SLURM_JOBID"]}')
 
     if ddp:
@@ -63,40 +64,41 @@ def main():
         local_rank = torch.device('cuda')
 
     if search:  # random search instead of grid search
-        base = np.random.choice(np.arange(16, 25, 8))
-        lin_act = np.random.choice(np.linspace(0.1, 0.3, 10))
+        base = np.random.choice(np.arange(16, 33, 8))
+        lin_act = np.random.choice(np.linspace(0.01, 0.3, 20))
         Na = np.random.choice(np.arange(1, 4))
         Nb, Nc = 2 * Na, Na
         lr = np.random.choice(np.logspace(-5, -2, 50))
         wd = np.random.choice(np.append(np.logspace(-3, -1, 10), 0.0))
-        drop_p = np.random.choice(np.linspace(0.1, 0.3, 10))
+        drop_p = np.random.choice(np.linspace(0.05, 0.3, 20))
         bias = np.random.choice(np.array([True, False]))
         hps = {
             'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
             'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 24
-        lin_act = 0.25556
-        Na, Nb, Nc = 2, 4, 2
-        lr = 4 * 4.498e-04
-        wd = 0.05995
-        drop_p = 0.3667
+        base = 32
+        lin_act = 0.05
+        Na, Nb, Nc = 1, 1, 1
+        lr = 400 * 3.39e-04
+        wd = 0.5
+        drop_p = 0.25
         bias = False
         hps = {
             'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
             'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
-    # model = IRNv4_3DUNet(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank)
-    model = IRNv4_3D(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank)
+    model = IRNv4_3DUNet(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank)
+    # model = IRNv4_3D(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank)
+    # model = IRNv4UNet(48, Na=Na, Nb=Nb, Nc=Nc, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank)
     if ddp: model = DDP(model, device_ids=[local_rank])
 
     optimizer = prep_optimizer(model, lr, wd)
-    sched1 = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
-    sched2 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[15, 30, 45, 55], gamma=0.1)
+    scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    #sched2 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[15, 30, 45, 55], gamma=0.1)
     # sched2 = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs - 5, eta_min=1e-6)
-    scheduler = optim.lr_scheduler.ChainedScheduler([sched1, sched2], optimizer=optimizer)
+    #scheduler = optim.lr_scheduler.ChainedScheduler([sched1, sched2], optimizer=optimizer)
     train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
     loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
     
@@ -135,8 +137,18 @@ def main():
 
             if ddp: dist.all_reduce(stop_signal, op=dist.ReduceOp.SUM, group=cpu_grp)
             if stop_signal.item() > 0:
-                print(f'Stopping at epoch {epoch}', flush=True) # will this work or error out
-                break
+                # print(f'Stopping at epoch {epoch}', flush=True) # will this work or error out
+                print(f'Reducing lr at epoch {epoch}', flush=True)
+                # this has a builtin method but probs not work for DDP?
+                # is this doing it 4 times over for each... first go 
+                for g in optimizer.param_groups:
+                    print(f'Rank {local_rank}', flush=True)
+                    print(g['lr'], flush=True)
+                    g['lr'] *= 0.1
+                    print(g['lr'], flush=True)
+                if rank == 0:
+                    helper.reset(epoch)
+
             #ty = time.time()
             #print(f'Epoch {epoch} done in {ty - tx} seconds', flush=True)
 
@@ -148,6 +160,7 @@ def main():
 
     except Exception as e:
         print(f'[ERROR]: Main on {local_rank} @ {time.time()} -- {e}')
+        raise e
     finally:
         if rank == 0 and not search: helper.plot_loss()
         if search: helper.best_loss()
@@ -172,6 +185,7 @@ def train(model, device, train_loader, optimizer, epoch):
         return torch.tensor(train_loss) 
     except Exception as e:
         print(f'[ERROR]: Training on {device} @ {time.time()} -- {e}', flush=True)
+        raise e
         return
 
 # ---------------------------------------------------------------------------------
@@ -193,6 +207,7 @@ def validate(model, device, val_loader, ddp=False):
         return vloss
     except Exception as e:
         print(f'[ERROR]: Validating on {device} @ {time.time()} -- {e}', flush=True)
+        raise e
         return
 
 # ---------------------------------------------------------------------------------

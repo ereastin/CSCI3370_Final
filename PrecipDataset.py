@@ -13,11 +13,17 @@ import matplotlib.pyplot as plt
 DEEP = True
 STATS = False
 NORM = True
+ROI = True
 
 def main():
     t1 = time.time()
-    pd = PrecipDataset('train', 'inc3d_reana', season='both', weekly=True)
-    source, target, t_str = pd.__getitem__(20)
+    pd = PrecipDataset('train', 'inc3d_reana', season='both', weekly=False)
+    s, t, tt = pd.__getitem__(20)
+    print(s.shape, t.shape)
+    return
+    for i, (s, t, t_str) in enumerate(pd):
+        if s.shape[0] != t.shape[0]:
+            print(t_str, f'failed, wrong shapes: {s.shape}, {t.shape}')
     t2 = time.time()
     print(t2 - t1)
 
@@ -103,7 +109,6 @@ class PrecipDataset(Dataset):
             month = month_off + (idx % self.n_months)  # idx % 12
 
         # TODO: quick fix for model changes 
-        """
         srcs, trgts = [], []
         for i in range(4):
             t_str = self.get_t_str(year, month, week=i)
@@ -112,9 +117,8 @@ class PrecipDataset(Dataset):
         source = torch.cat(srcs, dim=0)
         target = torch.cat(trgts, dim=0)
         # print(source.shape, target.shape)
-        """
-        t_str = self.get_t_str(year, month, week=week)
-        source, target = self.get_source(t_str), self.get_target(t_str)
+        # t_str = self.get_t_str(year, month, week=week)
+        # source, target = self.get_source(t_str), self.get_target(t_str)
         if source.shape[0] != target.shape[0]:
             source, target = self.prune(source, target)
         sample = (source, target, t_str)
@@ -154,6 +158,7 @@ class PrecipDataset(Dataset):
         f = os.path.join(self.source_dir,  'Cfill.' + t_str + '.nc')
         # open_ is slightly faster than load_
         ds = xr.open_dataset(f)  # ...(f, chunks='auto') dask has issues here
+        # ds = ds.sel(lev=self.p)  # to reduce number of plevels  included
 
         if self.rm_var is not None:
             ds = self._rm_var(ds)
@@ -176,6 +181,9 @@ class PrecipDataset(Dataset):
         # ok well is this not equivalent? check second row again it should be fine use permute not reshape
         if DEEP:
             source = torch.tensor(da.data).permute(1, 0, 2, 3, 4)
+            # if wanting to move away from 3d arch
+            # s = source.shape
+            # source = source.reshape(s[0], -1, s[3], s[4])
         else:
             times = da['time'].data
             source = [torch.tensor(da.sel(time=str(t)).data).reshape(-1, da.shape[3], da.shape[4]).unsqueeze(0) for t in times]
@@ -185,8 +193,14 @@ class PrecipDataset(Dataset):
         return source
 
     def get_target(self, t_str):
+        if ROI:
+            # too small i think to be valuable
+            # lat_slc, lon_slc = slice(31, 52), slice(-98.125, -89.375)
+            lat_slc, lon_slc = slice(28, 52), slice(-108.125, -84.375)
+        else:
+            lat_slc, lon_slc = slice(None, None), slice(None, None)
         f = os.path.join(self.target_dir, 'P.' + t_str + '.nc')
-        target = torch.tensor(xr.load_dataset(f).to_dataarray().data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
+        target = torch.tensor(xr.open_dataset(f).sel(lat=lat_slc, lon=lon_slc).to_dataarray().data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
         return target
 
 
