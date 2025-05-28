@@ -20,36 +20,35 @@ ROI = False
 # then could just grab it all at once and select what is needed at runtime
 # how is mem handled then tho? is file kept open the whole time? probably.?
 # if one week is selected is that array put in mem? how is it reused?
-
+# if literally opening the entire thing how are multiple workers handled? DDP?
+# AND what about remapping... if this was just selecting a lat/lon box and
+# maybe applying some transforms then sure, but with remap probably too slow?
+# how does xarray even handle these? just coarsening MSWEP probably OK?
+## ================================================================================
 def main():
     t1 = time.time()
+    ds = xr.open_mfdataset(os.path.join(pth.MSWEP, '200136*.nc'), chunks={})
+    print(ds)
     pd = PrecipDataset('train', 'inc3d_reana', season='both', weekly=True)
+    # TODO: so this works BUT lon/lat def -180:180/90:-90 so either shift or pay attention to slice order
+    # also mswep stuff is in 'center' of 0.1x0.1 square.? so shift by 0.05 in interp?
+    # self.bbox = '-140,-50.625,14,53.5'
+    ds1 = pd.select_batch(ds, time=slice('2001-12-27', '2001-12-28'), lat=slice(53.5, 14), lon=slice(-140, -50.625))
+    print(ds1)
+    ds1 = pd.regrid(ds1, new_lat_step=0.5, new_lon_step=0.625)
+    print(ds1)
     #s, t, tt = pd.__getitem__(20)
     #print(s.shape, t.shape)
     #return
-    for i, (s, t, t_str) in enumerate(pd):
-        print(i)
-        exit()
-        #if s.shape[0] != t.shape[0]:
-        #    print(t_str, f'failed, wrong shapes: {s.shape}, {t.shape}')
     t2 = time.time()
     #pd.get_stats()  # TODO: was this ever run for random weekly stuff
     print(t2 - t1)
 
+## ================================================================================
 class PrecipDataset(Dataset):
     def __init__(self, mode, exp, season='both', weekly=False, rm_var=None, zero=False):
         super(PrecipDataset, self).__init__()
 
-        """
-        these according to ERA5 for ~CONUS
-        driest: 2001, 2000, 2007, 2012, 1988  by increasing avg mm/day over the year e.g. 2001 is driest
-        wettest: 1983, 2019, 2018, 1982, 1998 by decreasing avg mm/day over the year e.g. 1983 is wettest
-        these were self picked... better way to select? is random better?
-        """
-        # these here are for original effort: train -> val -> test
-        # self.years = [2001, 2002, 2004, 2005, 2006, 2008, 2009, 2010, 2012, 2014, 2015, 2016, 2017, 2019, 2020]
-        # self.years = [2007, 2011, 2018]
-        # self.years = [2003, 2013]
         self.season = season
         self.n_months = 6 if self.season == 'both' else 3
         yrs = list(map(str, range(1980, 2021)))
@@ -57,7 +56,8 @@ class PrecipDataset(Dataset):
         mnths = list(map(lambda x: str(x).zfill(2), range(mnth_offset, mnth_offset + self.n_months)))
         wks = list(map(str, range(4)))
         t_strs = np.asarray([f'{l[0]}{l[1]}_{l[2]}' for l in list(product(yrs, mnths, wks))])
-        rng = np.random.default_rng(seed=4207765)  # fix the seed, at least one shuffle is the same everytime AFAIK..
+        # fix the seed, at least one shuffle is the same everytime AFAIK..
+        rng = np.random.default_rng(seed=4207765)
         for _ in range(3):
             rng.shuffle(t_strs)
 
@@ -80,8 +80,6 @@ class PrecipDataset(Dataset):
         self.rm_var = rm_var
         self.zero = zero
         self.vars = ['QV', 'T', 'U', 'V', 'OMEGA', 'H']
-        # these are for original version (Zhang)
-        self.p = [1000., 850., 700., 500., 200., 100., 50., 10.]
         self._stats = {
             'QVmin': [], 'QVmax': [], 'QVmn': [], 'QVstd': [],
             'Tmin': [], 'Tmax': [], 'Tmn': [], 'Tstd': [],
@@ -118,29 +116,9 @@ class PrecipDataset(Dataset):
         """
         select batch by idx -> month or week conversion
         """
-        if self.weekly:
-            #n_weeks = self.n_months * 4  # weeks per year
-            #year = self.years[idx // n_weeks]
-            #month_off = 5 if self.season == 'sum' else 2
-            #week_of_yr = idx % n_weeks
-            #month = month_off + (week_of_yr // 4)
-            #week = week_of_yr - (week_of_yr // 4 * 4)
-            t_str = self.t_strs[idx]
-        else:
-            month_off = 5 if self.season == 'sum' else 2
-            year = self.years[idx // self.n_months]  # self.years[idx // 12]
-            month = month_off + (idx % self.n_months)  # idx % 12
-
-        # TODO: quick fix for model changes 
-        #srcs, trgts = [], []
-        #for i in range(4):
-        #    t_str = self.get_t_str(year, month, week=i)
-        #    srcs.append(self.get_source(t_str))
-        #    trgts.append(self.get_target(t_str))
-        #source = torch.cat(srcs, dim=0)
-        #target = torch.cat(trgts, dim=0)
-        # print(source.shape, target.shape)
-        # t_str = self.get_t_str(year, month, week=week)
+        # TODO: presumably this is preconfigured to select for months/weeks/days etc.
+        # idx passed in would reflect which time frame per batch
+        t_str = self.t_strs[idx]
         source, target = self.get_source(t_str), self.get_target(t_str)
         if source.shape[0] != target.shape[0]:
             source, target = self.prune(source, target, t_str)
@@ -161,6 +139,19 @@ class PrecipDataset(Dataset):
         t_str += f'_{week}' if week is not None else ''
         return t_str
 
+    @staticmethod
+    def regrid(ds, new_lat_step=0.5, new_lon_step=0.625):
+        lat1, lat2 = round(ds.lat[0].item(), 2), round(ds.lat[-1].item(), 2)
+        lon1, lon2 = round(ds.lon[0].item(), 2), round(ds.lon[-1].item(), 2)
+        new_lat = np.arange(lat2, lat1, new_lat_step)
+        new_lon = np.arange(lon1, lon2, new_lon_step)
+        print(new_lat, new_lon)
+        return ds.interp(lat=new_lat, lon=new_lon)
+
+    @staticmethod
+    def select_batch(ds, **kwargs):
+        return ds.sel(**kwargs)
+
     def get_stats(self):
         for v in self.vars:
             vm, vs = np.mean(self._stats[v + 'mn']), np.mean(self._stats[v + 'std'])
@@ -168,13 +159,10 @@ class PrecipDataset(Dataset):
             print(f'Variable {v}: mean {vm} std {vs} max {mx} min {mn}')
 
     def _rm_var(self, ds):
-        # set variable to average value at each pressure-height.?
+        # what about perturbing? add noise etc?
         lev = ds.coords['lev']
         for p in self.p:
-            if self.zero:
-                fill = 0.0
-            else:
-                fill = ds[self.rm_var].sel(dict(lev=lev[lev == p])).mean()
+            fill = 0.0 if self.zero else ds[self.rm_var].sel(dict(lev=lev[lev == p])).mean()
             ds[self.rm_var].loc[dict(lev=lev[lev == p])] = fill
         return ds
 
@@ -200,24 +188,18 @@ class PrecipDataset(Dataset):
             for v in self.vars:
                 ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
         
-        da = ds.to_dataarray()
-        if DEEP:
-            source = torch.tensor(da.data).permute(1, 0, 2, 3, 4)
-            # if wanting to move away from 3d arch
-            # s = source.shape
-            # source = source.reshape(s[0], -1, s[3], s[4])
-        else:
-            times = da['time'].data
-            source = [torch.tensor(da.sel(time=str(t)).data).reshape(-1, da.shape[3], da.shape[4]).unsqueeze(0) for t in times]
-            source = torch.cat(source, dim=0)
+        #da = ds.to_dataarray()
+        source = torch.tensor(da.to_dataarray().data).permute(1, 0, 2, 3, 4)
+        # if wanting to move away from 3D arch
+        # s = source.shape
+        # source = source.reshape(s[0], -1, s[3], s[4])
         
-        # each chunk of source will be (time, lev, lat, lon)
+        # each chunk of source will be (time, var, (lev), lat, lon)
         return source
 
     def get_target(self, t_str):
         if ROI:
-            # too small i think to be valuable
-            # lat_slc, lon_slc = slice(31, 52), slice(-98.125, -89.375)
+            # rough CUS crop
             lat_slc, lon_slc = slice(28, 52), slice(-108.125, -84.375)
         else:
             lat_slc, lon_slc = slice(None, None), slice(None, None)
@@ -227,6 +209,6 @@ class PrecipDataset(Dataset):
         target = torch.tensor(da.data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
         return target
 
-
+## ================================================================================
 if __name__ == '__main__':
     main()

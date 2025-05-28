@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import time
+import json
 
 # custom imports
 from PrecipDataset import PrecipDataset
@@ -42,29 +43,40 @@ def main():
     rm_var, zero = args.rmvar, args.zero
     exp, season = args.exp, args.season
     # TODO: what about removing vertical shear? set all to..? average of midlevel?
-    note = season + '_' + 'ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
+    note = season + '_ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
         print('Using CPU')
-    
-    test_loader = prep_loader(exp, season, rm_var, zero)
-    model = prep_model(model_name, in_channels=6)
-    model = load_model(model, model_name, season, device)
+
+    tag = season + '_big'
+    test_loader = prep_loader(exp, season, rm_var, zero, weekly=True)
+    model = prep_model(model_name, tag, in_channels=6)
+    model = load_model(model, model_name, tag, device)
 
     print(f'Running test experiment: {note}')
     check_accuracy(model, model_name, test_loader, device, note=note, precip=args.precip, bias=args.bias)
 
 # ---------------------------------------------------------------------------------
-def prep_model(model_name, in_channels=64):
+def prep_model(model_name, tag, in_channels=64):
+    # TODO: just pass this to the model and have it load from there
+    path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
+    with open(path, 'r') as f:
+        hps = json.load(f)
+    Na, Nb, Nc = hps['Na'], hps['Nb'], hps['Nc']
+    base = hps['base']
+    lin_act = hps['lin_act']
+    bias = hps['bias']
+    drop_p = hps['drop_p']
+
     # create specified model
     match model_name:
         case 'inc':
             return IRNv4UNet(in_channels)
         case 'inc3d':
-            return IRNv4_3DUNet(in_channels, depth=35, Na=1, Nb=1, Nc=1, base=32, bias=False, lin_act=0.05)
+            return IRNv4_3DUNet(in_channels, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
@@ -72,7 +84,7 @@ def prep_model(model_name, in_channels=64):
 # ---------------------------------------------------------------------------------
 def prep_loader(exp, season, rm_var, zero, weekly=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-    test_ds = PrecipDataset('test', exp, season, weekly, rm_var, zero)
+    test_ds = PrecipDataset('train', exp, season, weekly, rm_var, zero)
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, pin_memory=False)
 
     return test_loader
@@ -81,7 +93,7 @@ def prep_loader(exp, season, rm_var, zero, weekly=False):
 def load_model(model, model_name, tag, device):
     path = os.path.join(f'./models/{model_name}/params_{tag}.pth')
     model.load_state_dict(torch.load(path, map_location=device))
-    
+ 
     return model
 
 # ---------------------------------------------------------------------------------
@@ -89,14 +101,14 @@ def check_accuracy(model, model_name, loader, device, note='', precip=False, bia
     loss_list, monthly_bias = [], []
     sel_out, sel_y, sel_t = [], [], []
     d_pred, d_obs, d_bias = [], [], []
-    rand_months = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
-    sel_months = rand_months # [1, 4, 15, 23]
+    rand_weeks = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
+    sel_months = rand_weeks # [1, 4, 15, 23]
 
-    #extent = (-140, -50.625, 14, 53.5)
-    extent = (-98.125, -89.375, 31, 52)
+    extent = (-140, -50.625, 14, 53.5)
+    #extent = (-108.125, -84.375, 28, 52)
     dlon, dlat = 0.625, 0.5
-    # lons, lats = np.arange(-140, -50.625 + dlon, dlon), np.arange(14, 53.5 + dlat, dlat)
-    lons, lats = np.arange(-98.125, -89.375 + dlon, dlon), np.arange(31, 52 + dlat, dlat)
+    lons, lats = np.arange(-140, -50.625 + dlon, dlon), np.arange(14, 53.5 + dlat, dlat)
+    #lons, lats = np.arange(-108.125, -84.375 + dlon, dlon), np.arange(28, 52 + dlat, dlat)
     # for zhang_repr
     # extent = (-108, -84.25, 24, 47.75)
     # lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
