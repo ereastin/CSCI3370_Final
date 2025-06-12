@@ -6,6 +6,9 @@ import torch.optim as optim
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+# from dask import array
+# from dask.diagnostics import ProgressBar
+# from dask.distributed import Client, LocalCluster
 from socket import gethostname
 import numpy as np
 from datetime import timedelta
@@ -18,39 +21,38 @@ from TrainHelper import TrainHelper
 from InceptUNet3D import IRNv4_3DUNet
 from Incept3D import IRNv4_3D
 from InceptUNet import IRNv4UNet
+# from Dummy import Dummy
 from PrecipDataset import PrecipDataset
 
 # for Lazy module dry-runs.. handle this better for other input shapes
 C, D, H, W = 6, 35, 80, 144
+FROM_LOAD = False
 
 # =================================================================================
 def main():
     parser = ArgumentParser()
     parser.add_argument('model_name', type=str)
     parser.add_argument('n_epochs', type=int)
-    parser.add_argument('-r', '--rmvar', type=str)
-    parser.add_argument('-z', '--zero', action='store_true')
     parser.add_argument('-s', '--search', action='store_true')
     parser.add_argument('-d', '--ddp', action='store_true')
     parser.add_argument('-op', '--optimparams', type=str)
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-sn', '--season', type=str)
+    parser.add_argument('-t', '--tag', type=str)
     args = parser.parse_args()
 
     model_name, n_epochs, ddp = args.model_name, args.n_epochs, args.ddp
-    rm_var, zero = args.rmvar, args.zero
     exp, season = args.exp, args.season
+    tag = args.tag
     search = args.search
     if args.optimparams is not None:
         op = args.optimparams.split(':')
         lr, wd = float(op[0]), float(op[1])
-    # TODO: what about removing vertical shear? set all to..? average of midlevel?
-    note = 'ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
+    model_id_tag = season + tag
     weekly = True
     print(f'Job ID: {os.environ["SLURM_JOBID"]}')
 
     if ddp:
-        # TODO: does this work as its own function?
         rank = int(os.environ['SLURM_PROCID'])
         world_size = int(os.environ['WORLD_SIZE'])
         gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
@@ -63,12 +65,12 @@ def main():
         torch.cuda.set_device(local_rank)
     else:
         world_size = 1
-        rank = 0  # this so we can use the conditionals below
+        rank = 0
         local_rank = torch.device('cuda')
 
     if search:  # random search instead of grid search
         base = np.random.choice([8, 12, 16, 24, 32])
-        lin_act = np.random.choice(np.linspace(0.01, 0.3, 20))
+        lin_act = np.random.choice(np.append(np.linspace(0.01, 0.3, 20), np.array([1.0])))
         #Na = np.random.choice(np.arange(1, 6))
         #Nb, Nc = 2 * Na, Na
         # just force to 1 each
@@ -77,61 +79,70 @@ def main():
         wd = np.random.choice(np.append(np.logspace(-3, -1, 10), np.linspace(0, 0.5, 5)))
         drop_p = np.random.choice(np.linspace(0.1, 0.3, 10))
         bias = np.random.choice(np.array([True, False]))
+        opt_type = np.random.choice(np.array(['adamw', 'adam', 'sgd']))
         hps = {
             'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
-            'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
+            'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        '''
-        Run completed in 2079.592135667801
-        Hyperparameters: 
-        {'base': np.int64(16), 'lin_act': np.float64(0.2694736842105263), 'Na': 1, 'Nb': 1, 'Nc': 1, 'lr': np.float64(0.00011288378916846884), 'wd': np.float64(0.007742636826811269), 'drop_p': np.float64(0.2333333333333333), 'bias': np.False_}
-        Min train loss: 24.324016571044922 @ epoch 5
-        Min val loss: 22.316369516981972 @ epoch 5
-        Run completed in 2152.9099204540253
-        Hyperparameters: 
-        {'base': np.int64(12), 'lin_act': np.float64(0.05578947368421053), 'Na': 1, 'Nb': 1, 'Nc': 1, 'lr': np.float64(0.00018329807108324357), 'wd': np.float64(0.001), 'drop_p': np.float64(0.1), 'bias': np.False_}
-        Min train loss: 22.34442138671875 @ epoch 5
-        Min val loss: 21.096297783984078 @ epoch 5
-        '''
-        base = 16
-        lin_act = 0.269
+        base = 6
+        lin_act = 0.3
         Na, Nb, Nc = 1, 1, 1
-        lr = 4 * 1.1e-4
-        wd = 0.0077
-        drop_p = 0.233
+        lr = 1e-4
+        #lr *= 4 if ddp else 1
+        max_lr = 5e-3
+        #max_lr *= 4 if ddp else 1
+        wd = 0
+        drop_p = 0.1
         bias = False
+        opt_type = 'adamw'
         hps = {
             'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
-            'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
+            'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
     model = IRNv4_3DUNet(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
+    # model = Dummy()
 
-    # dry-run for Lazy modules -- must be called before DDP init
-    model(torch.ones(1, C, D, H, W).to(local_rank))
+    if FROM_LOAD:
+        model = load_model(model, 'inc3d', model_id_tag, local_rank)
+    else:
+        # dry-run for Lazy modules -- must be called before DDP init
+        model(torch.ones(1, C, D, H, W).to(local_rank))
 
     if ddp: model = DDP(model, device_ids=[local_rank])
 
-    optimizer = prep_optimizer(model.parameters(), lr, wd)
-    scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=15)
+    optimizer = prep_optimizer(model.parameters(), lr, wd, opt_type)
+    #start_factor = 1 if search else 0.1
+    #scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=start_factor, total_iters=5)
     #sched2 = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[15, 30, 45, 55], gamma=0.1)
     # sched2 = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs - 5, eta_min=1e-6)
     #scheduler = optim.lr_scheduler.ChainedScheduler([sched1, sched2], optimizer=optimizer)
+
     train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
     loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
+
+    onecycle = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=(n_epochs * loader_len))
     
-    if rank == 0: helper = TrainHelper(model_name, tag=season + '_big', hyperparams=hps)
+    if rank == 0: helper = TrainHelper(model_name, tag=model_id_tag, hyperparams=hps)
     if ddp: cpu_grp = dist.new_group(backend='gloo')
     if ddp: dist.barrier()
     stop_signal = torch.tensor([0], dtype=torch.int)
 
     try:
+        '''
+        test dask/streaming stuff
+        n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+        cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
+        print(cluster, flush=True)
+        with Client(cluster) as client:
+            print(client, flush=True)
+        '''
         t1 = time.time()
         for epoch in range(1, n_epochs + 1):
-            #tx = time.time()
+            tx = time.time()
             if ddp: sampler.set_epoch(epoch)
-            l = train(model, local_rank, train_loader, optimizer, loss_fn, epoch)
+            l = train(model, local_rank, train_loader, optimizer, loss_fn, scheduler=onecycle)
             if ddp:
                 all_loss = [torch.zeros_like(l, device=torch.device('cpu')) for _ in range(world_size)]
                 dist.all_gather(all_loss, l, group=cpu_grp)
@@ -141,7 +152,7 @@ def main():
             else:
                 val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
                 train_loss = l / loader_len
-            scheduler.step()
+            # scheduler.step()
 
             if ddp: dist.barrier()  # make sure all training in epoch is done before saving
             if rank == 0:  # this should work for dpp or not
@@ -153,33 +164,27 @@ def main():
                     stop_signal = helper.checkpoint(model, epoch, search)
 
             if ddp: dist.barrier()  # make sure to not move forward with training while saving in rank0
-
             if ddp: dist.all_reduce(stop_signal, op=dist.ReduceOp.SUM, group=cpu_grp)
+
             if stop_signal.item() > 0:
-                # print(f'Stopping at epoch {epoch}', flush=True) # will this work or error out
-                print(f'Reducing lr at epoch {epoch}', flush=True)
-                # this has a builtin method but probs not work for DDP?
-                for g in optimizer.param_groups:
-                    g['lr'] *= 0.1
-                helper.reset(epoch)
+                print(f'No improvement, stopping at epoch {epoch}', flush=True) # will this work or error out
+                break
 
-            #ty = time.time()
-            #print(f'Epoch {epoch} done in {ty - tx} seconds', flush=True)
-
-        # this doesnt work...
-        # if rank > 0: exit(0)
+            ty = time.time()
+            print(f'Epoch {epoch} done in {ty - tx} seconds', flush=True)
 
         t2 = time.time()
         print(f'Run completed in {t2 - t1}', flush=True)
 
     except Exception as e:
         print(f'[ERROR]: Main on {local_rank} @ {time.time()} -- {e}')
+        raise e
     finally:
         if rank == 0: helper.finish(search)
         cleanup(ddp)
 
 # =================================================================================
-def train(model, device, train_loader, optimizer, loss_fn, epoch):
+def train(model, device, train_loader, optimizer, loss_fn, scheduler=None):
     try:
         train_loss = 0
         model.train()
@@ -191,6 +196,7 @@ def train(model, device, train_loader, optimizer, loss_fn, epoch):
             train_loss += loss.item()
             loss.backward()
             optimizer.step()
+            if scheduler is not None: scheduler.step()
 
         return torch.tensor(train_loss) 
     except Exception as e:
@@ -220,24 +226,69 @@ def validate(model, device, val_loader, loss_fn, ddp=False):
 
 # ---------------------------------------------------------------------------------
 def loss_fn(out, target):
+    # NOTE: potentially interesting thing here being how model performs with different loss fn
+    # over/underpredicting, drizzle etc.
     # original: MSE + penalty for negative predictions
     # return F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
 
     # test 1: MSE + negative penalty + emph on discrepancies of non-zero parts.?
-    mse_nonzero = F.mse_loss(out, target, weight=target)  # if target[i, j] is 0 -> loss[i, j] == 0, i.e. can't make gains from getting 0s right
+    # if target[i, j] is 0 -> loss[i, j] == 0, i.e. can't make gains from getting 0s right
+    #mse_nonzero = F.mse_loss(out, target, weight=(target / torch.max(target)))
     mse_all = F.mse_loss(out, target)  # this just mse everywhere
-    pen_neg = torch.mean(F.relu(-1 * out))
+    #pen_neg = torch.mean(F.relu(-1 * out))
     # print(f'Loss magnitudes: MSE Non0 {mse_nonzero.item()}, MSE All: {mse_all.item()}, Neg Penalty {pen_neg.item()}')
     # remove all except the nonzero?
-    return mse_nonzero + mse_all + pen_neg
+    #return mse_nonzero + mse_all #+ pen_neg
 
     # test 2: MSE + KL div? how would that work.?
+    # test 3: PCC uncentered (no mean sub)... this require gaussian distr? centered def not good
+    # perhaps can try centered in comb with mse_nonzero thing?
+    d = (2, 3)
+    # preserve dims for subtraction --> (B, 1, H, W)
+    # out_diff = out - torch.mean(out, dim=d, keepdim=True)
+    # target_diff = target - torch.mean(target, dim=d, keepdim=True)
+    # as of now this is a (B, 1) tensor --> reduce by mean or sum
+    # OK is this still in the range of 1 tho...
+    pcc = torch.sum(out * target, dim=d) / torch.sqrt(torch.sum(out ** 2, dim=d) * torch.sum(target ** 2, dim=d))
+    return 1 - torch.mean(pcc) + mse_all #+ mse_nonzero  # pcc near 1 is good if pcc is negative then this is even larger
 
 # ---------------------------------------------------------------------------------
-def prep_optimizer(model_params, lr=1e-4, wd=1e-2):
-    # might we want different optimizer 
-    # what about lr? with distributed training seen debates on scaling this
-    optimizer = optim.AdamW(model_params, lr=lr, weight_decay=wd)  # use default betas?
+def prep_model(model_name, tag, in_channels=64):
+    path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
+    with open(path, 'r') as f:
+        hps = json.load(f)
+    Na, Nb, Nc = hps['Na'], hps['Nb'], hps['Nc']
+    base = hps['base']
+    lin_act = hps['lin_act']
+    bias = hps['bias']
+    drop_p = hps['drop_p']
+
+    # create specified model
+    match model_name:
+        case 'inc':
+            return IRNv4UNet(in_channels)
+        case 'inc3d':
+            return IRNv4_3DUNet(in_channels, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+        case _:
+            print(f'Model "{model_name}" not valid')
+            sys.exit(-21)
+
+# ---------------------------------------------------------------------------------
+def load_model(model, model_name, tag, device):
+    path = os.path.join(f'./models/{model_name}/params_{tag}.pth')
+    model.load_state_dict(torch.load(path, map_location=device))
+
+    return model
+
+# ---------------------------------------------------------------------------------
+def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
+    match opt_type:
+        case 'adamw':
+            optimizer = optim.AdamW(model_params, lr=lr, weight_decay=wd)  # use default betas?
+        case 'adam':
+            optimizer = optim.Adam(model_params, lr=lr, weight_decay=wd)
+        case 'sgd':
+            optimizer = optim.SGD(model_params, lr=lr, weight_decay=wd, momentum=0.9)
 
     return optimizer
 

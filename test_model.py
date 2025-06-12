@@ -44,6 +44,7 @@ def main():
     exp, season = args.exp, args.season
     # TODO: what about removing vertical shear? set all to..? average of midlevel?
     note = season + '_ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
+    #note += 'trn'
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -51,7 +52,7 @@ def main():
         device = torch.device('cpu')
         print('Using CPU')
 
-    tag = season + '_big'
+    tag = season + '_sm2'
     test_loader = prep_loader(exp, season, rm_var, zero, weekly=True)
     model = prep_model(model_name, tag, in_channels=6)
     model = load_model(model, model_name, tag, device)
@@ -84,7 +85,7 @@ def prep_model(model_name, tag, in_channels=64):
 # ---------------------------------------------------------------------------------
 def prep_loader(exp, season, rm_var, zero, weekly=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-    test_ds = PrecipDataset('train', exp, season, weekly, rm_var, zero)
+    test_ds = PrecipDataset('test', exp, season, weekly, rm_var, zero)
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, pin_memory=False)
 
     return test_loader
@@ -101,14 +102,12 @@ def check_accuracy(model, model_name, loader, device, note='', precip=False, bia
     loss_list, monthly_bias = [], []
     sel_out, sel_y, sel_t = [], [], []
     d_pred, d_obs, d_bias = [], [], []
-    rand_weeks = torch.randint(len(loader) - 1, (4,)).tolist()  # select 4 random months from test set
-    sel_months = rand_weeks # [1, 4, 15, 23]
+    rand_weeks = torch.randint(len(loader) - 1, (4,)).tolist()  # select 6 random weeks
 
-    extent = (-140, -50.625, 14, 53.5)
-    #extent = (-108.125, -84.375, 28, 52)
+    #extent = (-140, -50.625, 14, 53.5)
+    extent = (-108.75, -83.125, 24, 50.5)
     dlon, dlat = 0.625, 0.5
-    lons, lats = np.arange(-140, -50.625 + dlon, dlon), np.arange(14, 53.5 + dlat, dlat)
-    #lons, lats = np.arange(-108.125, -84.375 + dlon, dlon), np.arange(28, 52 + dlat, dlat)
+    lons, lats = np.arange(extent[0], extent[1] + dlon, dlon), np.arange(extent[2], extent[3] + dlat, dlat)
     # for zhang_repr
     # extent = (-108, -84.25, 24, 47.75)
     # lons, lats = np.arange(-108, -84, 0.25), np.arange(24, 48, 0.25)
@@ -133,7 +132,7 @@ def check_accuracy(model, model_name, loader, device, note='', precip=False, bia
             if bias:
                 b = utils.calc_daily_bias(output, y, steps_per_day=8)  # (B // 4, 1, 96, 96), B // 4 being number of days
                 monthly_bias.append(b)
-            if precip and i in sel_months:
+            if precip and i in rand_weeks:
                 sel_out.append(output)
                 sel_y.append(y)
                 sel_t.append(t_str)

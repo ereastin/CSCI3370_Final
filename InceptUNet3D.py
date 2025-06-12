@@ -6,15 +6,16 @@ from Components import *
 
 EPS = 1e-5  # this is the default for BatchNorm
 PRINT = False
+ROI = True
 # ---------------------------------------------------------------------------------
 def main():
-    base = 8
+    base = 16
     lin_act = 0.117
     Na, Nb, Nc = 1, 1, 1  #3, 6, 3
     lr = 2.44e-04
     wd = 0.036
     drop_p = 0.163
-    bias = True
+    bias = False
 
     # use this insead of k3 s2?
     #print(calc_shape_out(144, 0, 2, 37, 1))
@@ -22,10 +23,12 @@ def main():
     #print(calc_shape_out(35, 0, 1, 18, 1))
     #exit()
 
+    # TODO: integrate an 'ROI' feature that retains the same arch but outputs just for CUS
     net = IRNv4_3DUNet(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
     #print(net)
-    net(torch.ones(1, 6, 35, 80, 144).cuda())
-    #print(net)
+    test = torch.ones(1, 6, 35, 80, 144).cuda()
+    net(test)
+    #print(net)  doing 54, 42 is just too small with all the downsampling..
     s = (64, 6, 35, 80, 144)
     summary(net, input_size=s)
     # TODO: handle padding/output padding stuff better! this will only work for known input shape
@@ -45,24 +48,19 @@ def printit(*args):
 
 # ---------------------------------------------------------------------------------
 class S1(nn.Module):
-  def __init__(self, in_size, base=32, b=False, drop_p=0.0):
-    super(S1, self).__init__()
+    def __init__(self, in_size, base=32, b=False, drop_p=0.0):
+        super(S1, self).__init__()
+        self.stem_a = nn.Sequential(
+            Conv3(base, k=(9, 3, 3), s=1, p='same', b=b),
+            Conv3(base, k=(3, 9, 3), s=1, p='same', b=b),
+            Conv3(base, k=(3, 3, 9), s=1, p='same', b=b),
+            Conv3(base, k=3, s=2, p=1, b=b),  # TODO: not sure this is actually here.? my original impl didnt reduce here
+            # Conv3(base, k=3, s=1, p=1, b=b),
+            Conv3(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p)
+        )
 
-    '''
-    self.stem_a = nn.Sequential(
-        Conv3(base, k=(18, 21, 37), s=1, p=0, d=(1, 2, 2), b=b),
-        Conv3(base, k=3, s=1, p=1, b=b),
-        Conv3(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p)
-    )
-    '''
-    self.stem_a = nn.Sequential(
-        Conv3(base, k=3, s=2, p=1, b=b),
-        Conv3(base, k=3, s=1, p=1, b=b),
-        Conv3(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p)
-    )
-
-  def forward(self, x):
-    return self.stem_a(x)
+    def forward(self, x):
+        return self.stem_a(x)
 
 # ---------------------------------------------------------------------------------
 class S2(nn.Module):
@@ -88,9 +86,9 @@ class S3(nn.Module):
         )
         self.stem_c2 = nn.Sequential(
             Conv3(2 * base, k=1, s=1, p=0, b=b),
-            Conv3(2 * base, k=(1, 7, 1), s=1, p='same', b=b),
-            Conv3(2 * base, k=(1, 1, 7), s=1, p='same', b=b),
-            Conv3(2 * base, k=(7, 1, 1), s=1, p='same', b=b),
+            Conv3(2 * base, k=(3, 7, 3), s=1, p='same', b=b),
+            Conv3(2 * base, k=(3, 3, 7), s=1, p='same', b=b),
+            Conv3(2 * base, k=(7, 3, 3), s=1, p='same', b=b),
             Conv3(3 * base, k=3, s=1, p='same', b=b)
         )
         self.drop = nn.Dropout3d(p=drop_p)
@@ -259,22 +257,19 @@ class revB(nn.Module):
         super(revB, self).__init__()
         self.rb1 = TConv2(in_size // 5, k=1, s=1, p=0, b=b) 
         self.rb2 = nn.Sequential(
-            TConv2(in_size // 7, k=(7, 1), s=1, p=(3, 0), b=b),
-            TConv2(in_size // 6, k=(1, 7), s=1, p=(0, 3), b=b),
-            TConv2(in_size // 5, k=1, s=1, p=0, b=b)
+            TConv2(in_size // 9, k=(7, 1), s=1, p=(3, 0), b=b),
+            TConv2(in_size // 8, k=(1, 7), s=1, p=(0, 3), b=b),
+            TConv2(in_size // 7, k=1, s=1, p=0, b=b)
         )
         self.final = nn.Sequential(
             nn.ReLU(),
             nn.Dropout2d(p=drop_p)
         )
-        # self.squish = nn.LazyConv3d(out_size, kernel_size=(3, 2, 2), stride=1, padding=0)
         self.trim = nn.MaxPool2d(kernel_size=2, stride=1, padding=0)
 
     def forward(self, x, cat_in):
         printit(f'Rev B in and cat in: {x.shape}, {cat_in.shape}')
-        s = cat_in.shape
-        cat_in = cat_in.reshape(s[0], -1, s[3], s[4])
-        printit("CAT", cat_in.shape)
+        # this still work?
         cat_in = self.trim(cat_in)
         printit("CAT", cat_in.shape)
         comb = torch.cat([x, cat_in], dim=1)
@@ -305,7 +300,6 @@ class revA(nn.Module):
     def forward(self, x, cat_in):
         printit(f'Rev A in and cat in: {x.shape}, {cat_in.shape}')
         s = cat_in.shape
-        cat_in = cat_in.reshape(s[0], -1, s[3], s[4])
         comb = torch.cat([x, cat_in], dim=1)
         ra1 = self.ra1(comb)
         ra2 = self.ra2(comb)
@@ -380,9 +374,33 @@ class revS1(nn.Module):
 
     def forward(self, x, cat_in):
         s = cat_in.shape
-        cat_in = cat_in.reshape(s[0], -1, s[3], s[4])
         cat = torch.cat([x, cat_in], dim=1)
         return self.rs1(cat)
+
+# ---------------------------------------------------------------------------------
+class revS1_ROI(nn.Module):
+    def __init__(self, in_size, out_size, b=False, drop_p=0.0):
+        super(revS1_ROI, self).__init__()
+        self.rs1 = nn.Sequential(
+            Conv2(out_size, k=(3, 5), s=1, p='same', b=b),
+            Conv2(out_size, k=(5, 3), s=1, p='same', b=b),
+        )
+        self.rs2 = nn.Sequential(
+            Conv2(out_size, k=(3, 5), s=1, p='same', b=b),
+            Conv2(out_size, k=(5, 3), s=1, p='same', b=b),
+        )
+        self.rs3 = nn.Sequential(
+            Conv2(out_size, k=5, s=1, p=0, b=b),
+            Conv2(out_size, k=3, s=1, p=0, b=b),
+        )
+
+    def forward(self, x, cat_in):
+        cat = torch.cat([x, cat_in], dim=1)
+        s = cat.shape
+        cat = cat.reshape(s[0], s[1], 60, 48)  # dont love the hard coded or the reshape this far down..
+        out = self.rs1(cat)
+        out = self.rs2(out)
+        return self.rs3(out)
 
 # ---------------------------------------------------------------------------------
 class revS2(nn.Module):
@@ -415,14 +433,10 @@ class revS3(nn.Module):
             TConv2(out_size, k=(7, 1), s=1, p=(3, 0), b=b),
             TConv2(out_size, k=1, s=1, p=0, b=b)
         )
-        # TODO: move these to the downswing side?
-        # self.squish = nn.Conv3d(in_size // 2, in_size // 2, kernel_size=(9, 1, 1), stride=1, padding=0)
         self.drop = nn.Dropout2d(p=drop_p)
 
     def forward(self, x, cat_in):
-        # cat_in = self.squish(cat_in).squeeze(2)
         s = cat_in.shape
-        cat_in = cat_in.reshape(s[0], -1, s[3], s[4])
         cat = torch.cat([x, cat_in], dim=1)
         printit(f'scat shape: {cat_in.shape}')
         rs3a = self.rs3a(cat)
@@ -456,7 +470,6 @@ class IRNv4_3DUNet(nn.Module):
         """
         super(IRNv4_3DUNet, self).__init__()
         self.depth = depth
-        self.Na, self.Nb, self.Nc = Na, Nb, Nc
         # down layers
         self.s1 = S1(in_size, base, b=bias, drop_p=drop_p)  # -> (B, 64, , H, W)
         self.s2 = S2(2 * base, base, b=bias, drop_p=drop_p)  # -> (B, 160, , H, W)
@@ -476,9 +489,12 @@ class IRNv4_3DUNet(nn.Module):
         self.rev_s4 = revS4(12 * base, 6 * base, b=bias, drop_p=drop_p)  # (B, 192, ...)
         self.rev_s3 = revS3(12 * base, 5 * base, b=bias, drop_p=drop_p)  # (B, 160, ...)  CAT
         self.rev_s2 = revS2(5 * base, 2 * base, b=bias, drop_p=drop_p)  # (B, 128, ...)
-        self.rev_s1 = revS1(4 * base, in_size, b=bias, drop_p=drop_p)  # (B, 5, ...)  CAT
+        if not ROI:
+            self.rev_s1 = revS1(4 * base, in_size, b=bias, drop_p=drop_p)  # (B, 5, ...)  CAT
+        else:
+            self.rev_s1 = revS1_ROI(4 * base, in_size, b=bias, drop_p=drop_p)
 
-        self.final = nn.Conv2d(in_size, 1, kernel_size=1, stride=1, padding=0, bias=bias)
+        self.final = nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias)
 
         self.net_down = nn.ModuleList(
                 [self.s1, self.s2, self.s3, self.s4] + self.a_n + [self.ra] + self.b_n + [self.rb] + self.c_n
@@ -488,23 +504,36 @@ class IRNv4_3DUNet(nn.Module):
             self.rev_rb, self.rev_b, self.rev_ra, self.rev_a,
             self.rev_s4, self.rev_s3, self.rev_s2, self.rev_s1
         ])
+        #self.bottom = Conv2(96 * base, k=(1, 4), s=1, p=0, b=bias, drop_p=drop_p)
+        # self.reduce = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.cat_select = [0, 2, 3 + Na, 3 + Na + 1 + Nb]
 
     def forward(self, x):
         outs = []
         for i, step in enumerate(self.net_down):
             x = step(x)
-            if i in [0, 2, 3 + self.Na, 3 + self.Na + 1 + self.Nb]:
-                outs.append(x)
-                printit(step, x.shape)
+            if i in self.cat_select:
+                s = x.shape
+                tmp = x.reshape(s[0], -1, s[3], s[4])
+                outs.append(tmp)
+                printit(step, tmp.shape)
 
-        # TODO: so this is after C-layer where still 3D but depth=1
-        # generalize to just reshape?
-        x = x.squeeze(2)
+        # reshape to 2D in/out
+        s = x.shape
+        x = x.reshape(s[0], -1, s[3], s[4])
+        #if ROI: x = self.bottom(x)
+        printit(f'BOTTOM: {x.shape}')
+
         ctr = 0
         for j, step in enumerate(self.net_up):
-            if (j + 1) % 2 == 0:
+            if (j + 1) % 2 == 0:  # (j + 1) % 2 == 0: is original
                 ctr += 1
                 printit(step, x.shape, outs[-ctr].shape)
+                # possible to just reshape to cat shape on the fly?
+                # e.g.
+                # xs = x.shape
+                # tmp = outs[-ctr]
+                # tmp = tmp.reshape(xs)  ? this works assuming HtxWt = HxxWx..
                 x = step(x, outs[-ctr])
             else:
                 x = step(x)

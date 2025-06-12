@@ -14,7 +14,7 @@ from itertools import product
 DEEP = True
 STATS = False
 NORM = True
-ROI = False
+ROI = True
 
 # TODO: worth trying a version of this with open_mfdataset()?
 # then could just grab it all at once and select what is needed at runtime
@@ -28,7 +28,7 @@ def main():
     #print(s.shape, t.shape)
     #return
     for i, (s, t, t_str) in enumerate(pd):
-        print(i)
+        print(s.shape, t.shape)
         exit()
         #if s.shape[0] != t.shape[0]:
         #    print(t_str, f'failed, wrong shapes: {s.shape}, {t.shape}')
@@ -217,8 +217,7 @@ class PrecipDataset(Dataset):
     def get_target(self, t_str):
         if ROI:
             # too small i think to be valuable
-            # lat_slc, lon_slc = slice(31, 52), slice(-98.125, -89.375)
-            lat_slc, lon_slc = slice(28, 52), slice(-108.125, -84.375)
+            lat_slc, lon_slc = slice(24, 50.5), slice(-108.75, -83.125)
         else:
             lat_slc, lon_slc = slice(None, None), slice(None, None)
 
