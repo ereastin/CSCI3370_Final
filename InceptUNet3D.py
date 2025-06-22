@@ -6,7 +6,7 @@ from Components import *
 
 EPS = 1e-5  # this is the default for BatchNorm
 PRINT = False
-ROI = True
+ROI = False
 # ---------------------------------------------------------------------------------
 def main():
     base = 16
