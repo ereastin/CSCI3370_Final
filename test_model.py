@@ -1,4 +1,4 @@
-## train.py: training framework for proposed models
+## test_model.py: testing framework for proposed models
 # ---------------------------------------------------------------------------------
 # pytorch imports
 import torch
@@ -16,6 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import time
 import json
+from scipy.special import inv_boxcox
 
 # custom imports
 from PrecipDataset import PrecipDataset
@@ -23,32 +24,32 @@ from OTPrecipDataset import OTPrecipDataset
 from Networks import *
 from InceptUNet import IRNv4UNet
 from InceptUNet3D import IRNv4_3DUNet
+from v2 import UNet
 
 sys.path.append('/home/eastinev/AI')
 import utils
 import paths as pth
 
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+BIAS = False
+
 ## ================================================================================
 def main():
     parser = ArgumentParser()
     parser.add_argument('model_name', type=str)
-    parser.add_argument('-r', '--rmvar', type=str)
-    parser.add_argument('-z', '--zero', action='store_true')
-    parser.add_argument('-p', '--precip', action='store_true')
-    parser.add_argument('-b', '--bias', action='store_true')
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-sn', '--season', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
     args = parser.parse_args()
 
     model_name = args.model_name
-    rm_var, zero = args.rmvar, args.zero
     exp, season = args.exp, args.season
     tag = args.tag
-    # TODO: what about removing vertical shear? set all to..? average of midlevel?
     model_id_tag = season + tag
-    note = model_id_tag + '_ctrl' if rm_var is None else f'{"no" if zero else "mn"}{rm_var}'
+
+    perturb_dict = {}
+
+    note = model_id_tag + '_ctrl'  # TODO: adjust this based on perturbation experiments
     #note += 'trn'
 
     if torch.cuda.is_available():
@@ -57,12 +58,13 @@ def main():
         device = torch.device('cpu')
         print('Using CPU')
 
-    test_loader = prep_loader(exp, season, rm_var, zero, weekly=True)
-    model = prep_model(model_name, model_id_tag, in_channels=6)
+    weekly = True
+    test_loader = prep_loader(exp, season, weekly, perturb_dict)
+    model = prep_model(model_name, model_id_tag, in_channels=5)
     model = load_model(model, model_name, model_id_tag, device)
 
     print(f'Running test experiment {note} on {model_id_tag}')
-    check_accuracy(model, model_name, test_loader, device, note=note, precip=args.precip, bias=args.bias)
+    check_accuracy(model, model_name, test_loader, device, note=note)
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag, in_channels=64):
@@ -81,15 +83,17 @@ def prep_model(model_name, tag, in_channels=64):
         case 'inc':
             return IRNv4UNet(in_channels)
         case 'inc3d':
-            return IRNv4_3DUNet(in_channels, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+            return IRNv4_3DUNet(in_channels, depth=16, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+        case 'unet':
+            return UNet(16)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
 
 # ---------------------------------------------------------------------------------
-def prep_loader(exp, season, rm_var, zero, weekly=False):
+def prep_loader(exp, season, weekly, perturb_dict):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-    test_ds = OTPrecipDataset('test', exp, season, weekly, rm_var, zero)
+    test_ds = OTPrecipDataset('test', exp, season, weekly, False, perturb_dict)
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, pin_memory=False)
 
     return test_loader
@@ -102,17 +106,20 @@ def load_model(model, model_name, tag, device):
     return model
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device, note='', precip=False, bias=False):
-    loss_list, monthly_bias = [], []
-    selected = []
+def check_accuracy(model, model_name, loader, device, note=''):
+    monthly_bias = []
     d_pred, d_obs, d_bias = [], [], []
-    rand_weeks = torch.randint(len(loader) - 1, (4,)).tolist()  # select 6 random weeks
 
     # sumatra squall stuff
     extent = (92.8, 107.2, 0.0, 8.0)
     gridshape = (80, 144)  # (H, W)
-    # dlon, dlat = 0.1, 0.1  # np.arange() isnt stable when start >> step for some reason..
-    
+    accum_dict = {
+        'DJF': [torch.zeros(gridshape)] * 3 + [0],
+        'MAM': [torch.zeros(gridshape)] * 3 + [0],
+        'JJA': [torch.zeros(gridshape)] * 3 + [0],
+        'SON': [torch.zeros(gridshape)] * 3 + [0],
+    }
+
     # CUS 3D Inc MERRA2
     # extent = (-140, -50.625, 14, 53.5)  # full repr
     # extent = (-108.75, -83.125, 24, 50.5)  # CUS ROI
@@ -125,47 +132,57 @@ def check_accuracy(model, model_name, loader, device, note='', precip=False, bia
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
     plot_params = {'extent': extent, 'lons': lons, 'lats': lats}
 
-    # select specific days
-    selected = [(1989, 4, 12), (1980, 11, 22), (1988, 4, 24), (2006, 5, 18)]
-    # selected = [(1996, 6, 26), (2003, 5, 20), (1993, 5, 10), (2009, 4, 29)]
-    # Sumatra Squall events (not in test apparently)
+    # select specific (or random) days
+    selected = [(1989, 7, 14), (2012, 4, 12), (1982, 7, 15), (2008, 6, 24), (2000, 6, 14)]
+    # selected = [(np.random.choice(np.arange(1980, 2021)), np.random.choice(np.arange(4, 12)), np.random.choice(np.arange(1, 31))) for _ in range(4)]  # select 4 random days
+    # Known Sumatra Squall events (not in test apparently)
     # selected = [(2016, 7, 12), (2014, 6, 11), (2014, 6, 12)]
+    if os.path.exists('./agg_norm_vars.json'):
+        with open('./agg_norm_vars.json', 'r') as f:
+            stats = json.load(f)
+    p_mean = stats['precipitationmn']
+    p_std = stats['precipitationstd']
+    spd = 4
 
+    test_loss = 0
     model = model.to(device)
     model.eval()
     with torch.no_grad():
         for i, (source, target, time_id) in enumerate(loader):
             print(f'Testing model on {utils.get_time_str(time_id)}...')
-            if source is None or target is None:
-                continue
             source, target = source.to(device=device), target.to(device=device)
             pred = model(source)
-            loss = F.mse_loss(pred, target) # + torch.mean(F.relu(-1 * output))  # include relu in MSE calcs..?
-            loss_list.append(loss.item())
+            #pred, target = torch.exp(pred) - 1, torch.exp(target) - 1  # correct for log-norm prediction 
+            target = target * p_std + p_mean
+            pred = pred * p_std + p_mean
+            loss = F.mse_loss(pred, target)  # just check pixelwise MSE
+            test_loss += loss.item()
 
-            # get pdf stuff
-            # pred_accum, obs_accum, bb = utils.calc_daily_accum(pred, target)
-            # d_pred.append(pred_accum)
-            # d_obs.append(obs_accum)
-            # d_bias.append(bb)
+            if BIAS:
+                season = utils.get_season_str(time_id)
+                pred_batch_accum, n_days = utils.calc_batch_accum(pred, steps_per_day=spd)
+                target_batch_accum, _ = utils.calc_batch_accum(target, steps_per_day=spd)
+                bias_batch_accum, _ = utils.calc_batch_accum(pred - target, steps_per_day=spd)
+                accum_dict[season][0] += pred_batch_accum.numpy(force=True)
+                accum_dict[season][1] += target_batch_accum.numpy(force=True)
+                accum_dict[season][2] += bias_batch_accum.numpy(force=True)
+                accum_dict[season][3] += n_days
 
-            if bias:
-                b = utils.calc_daily_bias(pred, target, steps_per_day=8)
-                monthly_bias.append(b)
-
+            # do precip prediction plotting
             day_sel = utils.match_time_str(time_id, selected)
             for d in day_sel:
                 time_sel = utils.get_time_str(time_id, day_sel)
                 # fetch specific day from batch
-                pred_sel = pred[d * 8:(d + 1) * 8]
-                target_sel = target[d * 8:(d + 1) * 8]
+                pred_sel = pred[d * spd:(d + 1) * spd]
+                target_sel = target[d * spd:(d + 1) * spd]
                 utils.plot_precip(pred_sel, target_sel, time_sel, plot_params, model_name, note=note)
 
-    mean_loss = np.mean(loss_list)
-    print(f'Mean MSE loss on test set: {mean_loss}')
-    # utils.get_pdf(d_pred, d_obs, d_bias, model_name, note=note)
-    if bias:
-        utils.plot_bias(monthly_bias, plot_params, model_name, note=note)
+    test_loss /= len(loader)
+    print(f'Mean MSE loss on test set: {test_loss}')
+    if BIAS:
+        # per-cell average daily values
+        mean_daily_bias = {k: v[2] / v[3] for k, v in accum_dict.items() if v[3] != 0}
+        utils.plot_bias(mean_daily_bias, plot_params, model_name, note=note)
 
 # ---------------------------------------------------------------------------------
 if __name__ == '__main__': 

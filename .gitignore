@@ -4,3 +4,6 @@ models/*
 *.sl
 *.png
 scratch.py
+*.nc
+*.nc4
+*.json

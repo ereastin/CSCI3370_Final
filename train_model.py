@@ -25,13 +25,16 @@ from TrainHelper import TrainHelper
 from InceptUNet3D import IRNv4_3DUNet
 from Incept3D import IRNv4_3D
 from InceptUNet import IRNv4UNet
+from v2 import UNet
 from Dummy import Dummy
 from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
+from decorators import timeit
 
 # for Lazy module dry-runs.. handle this better for other input shapes
-C, D, H, W = 6, 35, 80, 144
+C, D, H, W = 5, 16, 80, 144
 FROM_LOAD = False
+MIN, MAX = np.log(1.1), np.log(101)
 
 # =================================================================================
 def main():
@@ -40,7 +43,6 @@ def main():
     parser.add_argument('n_epochs', type=int)
     parser.add_argument('-s', '--search', action='store_true')
     parser.add_argument('-d', '--ddp', action='store_true')
-    parser.add_argument('-op', '--optimparams', type=str)
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-sn', '--season', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
@@ -50,17 +52,15 @@ def main():
     exp, season = args.exp, args.season
     tag = args.tag
     search = args.search
-    if args.optimparams is not None:
-        op = args.optimparams.split(':')
-        lr, wd = float(op[0]), float(op[1])
     model_id_tag = season + tag
-    weekly = True
+    weekly = True  # check memory on this vs monthly.. max ~3GB per month so why fail with 16GB per cpu?
     print(f'Job ID: {os.environ["SLURM_JOBID"]}', flush=True)
 
     if ddp:
         rank = int(os.environ['SLURM_PROCID'])
         world_size = int(os.environ['WORLD_SIZE'])
         gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
+        # os.environ['TORCH_NCCL_TRACE_BUFFER_SIZE'] = '1'  # doesnt seem to do shit
         assert gpus_per_node == torch.cuda.device_count()
         print(f'Rank {rank} of {world_size} on {gethostname()} which has {gpus_per_node} allocated GPUs per node', flush=True)
 
@@ -74,39 +74,44 @@ def main():
         local_rank = torch.device('cuda')
 
     if search:  # random search instead of grid search
-        base = np.random.choice([8, 12, 16, 24, 32])
-        lin_act = np.random.choice(np.append(np.linspace(0.01, 0.3, 20), np.array([1.0])))
-        #Na = np.random.choice(np.arange(1, 6))
-        #Nb, Nc = 2 * Na, Na
+        base = np.random.choice([6, 8, 12, 16, 24, 32])
+        lin_act = np.random.choice(np.append(np.linspace(0.05, 0.3, 10), np.array([1.0])))
+        Na = np.random.choice(np.arange(1, 6))
+        Nb, Nc = 2 * Na, Na
         # just force to 1 each
-        Na, Nb, Nc = 1, 1, 1
+        # Na, Nb, Nc = 1, 1, 1
         lr = np.random.choice(np.logspace(-5, -1, 20))
+        max_lr = lr * 50
         wd = np.random.choice(np.append(np.logspace(-3, -1, 10), np.linspace(0, 0.5, 5)))
-        drop_p = np.random.choice(np.linspace(0.1, 0.3, 10))
+        drop_p = np.random.choice(np.linspace(0.0, 0.3, 10))
         bias = np.random.choice(np.array([True, False]))
-        opt_type = np.random.choice(np.array(['adamw', 'adam', 'sgd']))
+        opt_type = 'adamw' #np.random.choice(np.array(['adamw', 'adam', 'sgd']))
+        loss_fn = np.random.choice(np.array([huber, mse, wt_mse, mae]))
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
-            'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': loss_fn.__name__,
+            'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 6
-        lin_act = 0.3
-        Na, Nb, Nc = 1, 1, 1
+        base = 32
+        lin_act = .3
+        Na, Nb, Nc = 1, 2, 1
         lr = 1e-4
-        #lr *= 4 if ddp else 1
         max_lr = 5e-3
+        # TODO: never clear if this actually works
+        #lr *= 4 if ddp else 1
         #max_lr *= 4 if ddp else 1
-        wd = 0
-        drop_p = 0.1
-        bias = False
+        wd = 0.01
+        drop_p = 0.3
+        bias = True
         opt_type = 'adamw'
+        loss_fn = comp_loss_fn
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc,
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': loss_fn.__name__,
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
-    model = IRNv4_3DUNet(6, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
+    model = UNet(16).to(local_rank).float()
+    #model = IRNv4_3DUNet(C, depth=16, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
     # model = Dummy().to(local_rank).float()
 
     if FROM_LOAD:
@@ -127,38 +132,28 @@ def main():
     train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
     loader_len = len(train_loader.dataset) + (len(train_loader.dataset) % world_size) if ddp else len(train_loader.dataset)
 
-    onecycle = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=(n_epochs * loader_len))
+    onecycle = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=(n_epochs * loader_len) // world_size)
     
     if rank == 0: helper = TrainHelper(model_name, tag=model_id_tag, hyperparams=hps)
     if ddp: cpu_grp = dist.new_group(backend='gloo')
     if ddp: dist.barrier()
     stop_signal = torch.tensor([0], dtype=torch.int)
-    #print('pre loop', flush=True)
 
     try:
-        '''
-        nn_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-        n_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])
-        n_cpus -= 4
-        print(n_cpus, nn_cpus)
-        cluster = LocalCluster(n_workers=n_cpus, memory_limit='2GiB')  # have to specify this think it defaults to 4 or smthn
-        print(cluster, flush=True)
-        with Client(cluster) as client:
-            print(client, flush=True)
-            print(client.run(os.getenv, "MALLOC_TRIM_THRESHOLD_"))
-        '''
-        #_ = next(iter(train_loader))  # ig check this is ready?
         t1 = time.time()
         for epoch in range(1, n_epochs + 1):
             tx = time.time()
             if ddp: sampler.set_epoch(epoch)
             l = train(model, local_rank, train_loader, optimizer, loss_fn, scheduler=onecycle)
+            #print('validating')
             if ddp:
+                dist.barrier()
                 all_loss = [torch.zeros_like(l, device=torch.device('cpu')) for _ in range(world_size)]
                 dist.all_gather(all_loss, l, group=cpu_grp)
                 if rank == 0:
                     val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
                     train_loss = torch.sum(torch.tensor(all_loss)) / loader_len
+                    if train_loss is torch.nan: raise ValueError
             else:
                 val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
                 train_loss = l / loader_len
@@ -182,10 +177,13 @@ def main():
 
             ty = time.time()
             print(f'Epoch {epoch} done in {ty - tx} seconds', flush=True)
+            raise KeyboardInterrupt
 
         t2 = time.time()
         print(f'Run completed in {t2 - t1}', flush=True)
 
+    except ValueError as e:
+        print(f'[ERROR]: Loss is nan @ epoch {epoch} with message {e}, exiting...')
     except Exception as e:
         print(f'[ERROR]: Main on {local_rank} @ {time.time()} -- {e}')
         raise e
@@ -194,13 +192,12 @@ def main():
         cleanup(ddp)
 
 # =================================================================================
+#@timeit
 def train(model, device, train_loader, optimizer, loss_fn, scheduler=None):
     try:
         train_loss = 0
         model.train()
         for i, (source, target, tt) in enumerate(train_loader):
-            if source is None or target is None:
-                continue
             source, target = source.to(device).float(), target.to(device).float()
             optimizer.zero_grad()
             out = model(source)
@@ -223,14 +220,10 @@ def train(model, device, train_loader, optimizer, loss_fn, scheduler=None):
 def validate(model, device, val_loader, loss_fn, ddp=False):
     try:
         vloss = 0
-        # ctr = 0
         model.eval()
         val_model = model if not ddp else model.module
         with torch.no_grad():
             for i, (source, target, _) in enumerate(val_loader):
-                if source is None or target is None:
-                    # ctr += 1
-                    continue
                 source, target = source.to(device).float(), target.to(device).float()
                 out = val_model(source)
                 loss = loss_fn(out, target)
@@ -245,42 +238,57 @@ def validate(model, device, val_loader, loss_fn, ddp=False):
         return
 
 # ---------------------------------------------------------------------------------
-def loss_fn(pred, target):
-    # NOTE: potentially interesting thing here being how model performs with different loss fn
-    # over/underpredicting, drizzle etc.
-    # original: MSE + penalty for negative predictions
-    # return F.mse_loss(out, target, reduction='mean') + torch.mean(F.relu(-1 * out))
-    mae_loss = F.l1_loss(pred, target)
-    return mae_loss
+def huber(pred, target):
+    return F.huber_loss(pred, target, delta=3)
 
-    # test 1: MSE + negative penalty + emph on discrepancies of non-zero parts.?
-    # if target[i, j] is 0 -> loss[i, j] == 0, i.e. can't make gains from getting 0s right
-    #mse_nonzero = F.mse_loss(out, target, weight=target)
-    mse_all = F.mse_loss(pred, target)  # this just mse everywhere
-    #pen_neg = torch.mean(F.relu(-1 * out))
+def mse(pred, target):
+    return F.mse_loss(pred, target)
 
-    # TODO: what about a 2D FFT.? then could at least compare spectral content.?
-    B = pred.shape[0]
-    hpf = torch.zeros((B, 1, 3, 3))
-    hpf[:, 0] = torch.tensor([[[0, -1/4, 0], [-1/4, 2, -1/4], [0, -1/4, 0]]])
-    hpf = hpf.to('cuda')
-    phf = F.conv2d(pred, hpf, padding='same')
-    thf = F.conv2d(target, hpf, padding='same')
-    hpf_mse = F.mse_loss(phf, thf)
-    # print(hpf_mse.item())
-    return hpf_mse + mse_all
+def wt_mse(pred, target):
+    pred = pred * 3.4236 + 1.874474
+    target = target * 3.4236 + 1.874474
+    return F.mse_loss(pred, target)
 
-    # would be interesting to rewrite into high/low frequency nets
-    # e.g. pass LSF through high/low-pass filters then do sep nets and combine
+def mae(pred, target):
+    return F.l1_loss(pred, target)
 
-    # test 3: PCC uncentered (no mean sub)... this require gaussian distr? centered def not good
-    # perhaps can try centered in comb with mse_nonzero thing?
-    d = (2, 3)
-    # preserve dims for subtraction --> (B, 1, H, W)
-    # out_diff = out - torch.mean(out, dim=d, keepdim=True)
-    # target_diff = target - torch.mean(target, dim=d, keepdim=True)
-    #pcc = torch.sum(out * target, dim=d) / torch.sqrt(torch.sum(out ** 2, dim=d) * torch.sum(target ** 2, dim=d))
-    return mse_all + mse_nonzero  #1 - torch.mean(pcc) + mse_all #+ mse_nonzero  # pcc near 1 is good if pcc is negative then this is even larger
+def wt_mae(pred, target):
+    wt = torch.where(target <= MIN, MIN, target)
+    wt = torch.where(wt >= MAX, MAX, wt)
+    l1 = torch.mean(wt * torch.abs(pred - target))
+    return l1
+
+def pcc(pred, target):
+    t = torch.exp(target) - 1
+    mt = torch.mean(t, dim=(2, 3), keepdim=True)
+    ts = t - mt
+    p = torch.exp(pred) - 1
+    mp = torch.mean(p, dim=(2, 3), keepdim=True)
+    ps = p - mp
+    eps = 0
+    pcc_loss = torch.sum(ps * ts) / torch.sqrt(torch.sum(ps ** 2) * torch.sum(ts ** 2) + eps)
+    return 1 - pcc_loss
+
+def fft(pred, target):
+    #t = torch.exp(target) - 1
+    #p = torch.exp(pred) - 1
+    fft_pred = torch.abs(torch.fft.fft2(pred, norm='ortho'))# - torch.mean(p, dim=(2, 3), keepdim=True), norm='ortho'))
+    fft_target = torch.abs(torch.fft.fft2(target, norm='ortho'))# - torch.mean(t, dim=(2, 3), keepdim=True), norm='ortho'))
+    fft_loss = F.mse_loss(fft_pred, fft_target)
+    return fft_loss
+    
+def comp_loss_fn(pred, target):
+    #mae_loss = mae(pred, target)
+    mse_loss = mse(pred, target)
+    #huber_loss = huber(pred, target)
+    #wt_mse_loss = wt_mse(pred, target)
+    #neg = torch.mean(F.relu(-1 * (torch.exp(pred) - 1)))
+    #fft_loss = fft(pred, target)
+    #pcc_loss = pcc(pred, target)
+    #print(wt_mse_loss.item(), fft_loss.item(), pcc_loss.item())
+    print(mse_loss.item())#, fft_loss.item())#, mae_loss.item())
+    return mse_loss #+ 1 * fft_loss
+    #return wt_mse_loss + 1 * fft_loss + 10 * pcc_loss
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag, in_channels=64):
@@ -299,6 +307,8 @@ def prep_model(model_name, tag, in_channels=64):
             return IRNv4UNet(in_channels)
         case 'inc3d':
             return IRNv4_3DUNet(in_channels, depth=35, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+        case 'unet':
+            return UNet(16)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
@@ -325,8 +335,8 @@ def prep_optimizer(model_params, lr=1e-4, wd=1e-2, opt_type='adamw'):
 # ---------------------------------------------------------------------------------
 def prep_loaders(exp, season, rank, world_size, weekly=False, ddp=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-    prefetch = 2
-    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly)
+    prefetch = 1
+    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=True)
     val_ds = OTPrecipDataset('val', exp, season, weekly=weekly)
 
     sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None
