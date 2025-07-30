@@ -96,7 +96,7 @@ class OTPrecipDataset(Dataset):
             case 'val':
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
-                #self.t_strs = t_strs[1:2]
+                #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[tr + v:]
             case 'prep':
                 self.t_strs = t_strs
@@ -179,17 +179,17 @@ class OTPrecipDataset(Dataset):
         """
         select batch by idx
         """
+        # TODO: forecasting would be handled here when passing files.. 
+        # does open_mfdataset() work with just one item list?
         if self.weekly:
-            (year, month, week) = self.t_strs[idx]
-            fname = f'{year}_{str(month).zfill(2)}_{week}.nc'
+            (year, month, week) = self.t_strs[idx] 
+            source_rw_pth, target_rw_pth = self._get_filepaths(year, month, week)
         else:
             (year, month), week = self.t_strs[idx], None
             fname = f'{year}_{str(month).zfill(2)}_*.nc'  # this will not work for writing..
 
         wk_days, _ = self._get_wk_days(year, month, week)
         time_id = {'yr': year, 'mn': month, 'days': wk_days}
-        source_rw_pth = os.path.join(pth.SCRATCH, self.exp, 'LSF_' + fname)
-        target_rw_pth = os.path.join(pth.SCRATCH, self.exp, 'P_' + fname)
 
         if self.mode == 'prep':
             curr_files = os.listdir(os.path.join(pth.SCRATCH, self.exp))
@@ -245,14 +245,35 @@ class OTPrecipDataset(Dataset):
             if source is None or target is None:
                 return (None, None, time_id)
 
+            # Trim if missing timesteps (only good for Dec 31 2020 bc of MSWEP?)
             if source.shape[0] != target.shape[0]:
                 source, target = self.prune(source, target, time_id)
+
+            # Shuffle within batch
             if self.shuffle:
                 shuff_idx = torch.randperm(source.shape[0])
                 source = source[shuff_idx]
                 target = target[shuff_idx]
+
             sample = (source, target, time_id)
             return sample
+
+    # -----------------------------------------------------------------------------
+    def _get_filepaths(self, year, month, week):
+        # MERRA stuff
+        source_rw_pth = os.path.join(pth.SCRATCH, self.exp, f'LSF_{year}_{str(month).zfill(2)}_{week}.nc')
+
+        # MSWEP stuff
+        if not FORECAST:
+            target_rw_pth = [os.path.join(pth.SCRATCH, self.exp, f'P_{year}_{str(month).zfill(2)}_{week}.nc')]
+        else:
+            if week == 3:
+                paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month + 1).zfill(2)}_{0}.nc']
+            else:
+                paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month).zfill(2)}_{week + 1}.nc']
+            target_rw_pth = [os.path.join(pth.SCRATCH, self.exp, p) for p in paths]
+
+        return source_rw_pth, target_rw_pth
 
     # -----------------------------------------------------------------------------
     @staticmethod
@@ -304,30 +325,12 @@ class OTPrecipDataset(Dataset):
     # TODO: move to utils ??
     # -----------------------------------------------------------------------------
     def _get_files_by_time(self, year, month, week):
-        # TODO: forecasting would need opening the 'week' +- a couple days dep on how far out
-        # -> create xr Dataset then .sel() specific time slice
-        # opening entire dataset and reusing ds ref is way too slow
         wk_days, leap_year = self._get_wk_days(year, month, week)
 
+        # MERRA fname: <>.YYYYMMDD.nc4
         N = self._get_merra_nsel(year, month)
         merra_base = f'MERRA2_{N}.inst3_3d_asm_Np.' + str(year) + str(month).zfill(2)
         merra_fs = [os.path.join(pth.MERRA,  merra_base + str(day).zfill(2) + '.nc4') for day in wk_days]
-
-        # TODO: forecasting addition would go here
-        # really gonna a need a 'streaming' version of this otherwise need to rewrite the local files every fckn time...
-        # depends how far forward we want to forecast no? next 3 hours? 
-        # if forecasting more than one timestep how does that work?
-        # want it so that model predicts each step or just outright predicts N hours/days in the future?
-        # this model type isnt predicting the large scale fields, so probs not predict each step and feed back in
-        # NOTE: for this just do open_mfdataset that encompasses and then slice to appropriate times
-        if FORECAST:  # easiest here is 1 day
-            # if just one day still need the extra day.. easiest to break by hours then
-            forecast_reach = 3  # hours
-            forecast_day = forecast_reach // 24
-            forecast_hr = forecast_reach % 24
-        else:
-            forecast_day = 0
-            forecast_hour = 0
 
         # MSWEP fname: YYYYDDD.HH.nc
         d0 = 1 if leap_year and month > 2 else 0
@@ -483,7 +486,12 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def read_target(self, in_file):
-        ds = xr.open_dataset(in_file) if self.weekly else xr.open_mfdataset(in_file)
+        ds = xr.open_mfdataset(in_file)
+
+        if FORECAST:
+            # this should work right -> just forecasting next timestep..
+            # what if want farther out? cant feed LSF autoregressively so would just be a 'jump'
+            ds = ds.isel(time=slice(1, 64 + 1))
 
         if AGG:
             ds = ds.resample(time='6h').sum()

@@ -87,12 +87,12 @@ def main():
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 32 # 16, 32 seem ~ same overfitting single batch
+        base = 64 # 16, 32 seem ~ same overfitting single batch
         lin_act = 1
-        Na, Nb, Nc = 5, 10, 5
-        lr = 1e-3
-        wd = 0
-        drop_p = 0.05
+        Na, Nb, Nc = 1, 2, 1
+        lr = 1e-4
+        wd = 0.01
+        drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
         loss_fn = mse
@@ -119,7 +119,7 @@ def main():
     optimizer = prep_optimizer(model.parameters(), lr, wd, opt_type)
 
     # Create scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=15, cooldown=0)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.3, patience=15, cooldown=0)
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[250, 225, 250], gamma=0.5)
 
     # Create DataLoaders
@@ -198,7 +198,6 @@ def main():
         if rank == 0:
             t2 = time.time()
             print(f'Run completed in {t2 - t1}', flush=True)
-        #helper._save_point(model, epoch)
 
     except ValueError as e:
         print(f'[ERROR]: Loss is nan @ epoch {epoch} with message {e}, exiting...')

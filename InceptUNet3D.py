@@ -6,10 +6,11 @@ from Components import *
 
 PRINT = False
 ROI = True
+ATTN = True
 N, D, H, W = 6, 8, 80, 144
 # ---------------------------------------------------------------------------------
 def main():
-    base = 36
+    base = 64
     lin_act = 0.117
     Na, Nb, Nc = 5, 10, 5  #3, 6, 3
     lr = 2.44e-04
@@ -121,21 +122,19 @@ class S4(nn.Module):
 
 # ---------------------------------------------------------------------------------
 class A(nn.Module):
-    # 12b -> 12b, reverse (12 + 12)b -> 12b
-    def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1, reverse=False):
+    # 12b -> 12b
+    def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1):
         super(A, self).__init__()
         self.lin_act = lin_act
-        self.reverse = reverse
-        scale = 2 if self.reverse else 1
-        self.a1 = Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p)
+        self.a1 = Conv3(base, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.a2 = nn.Sequential(
-            Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
-            Conv3(base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
+            Conv3(base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(base, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.a3 = nn.Sequential(
-            Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
-            Conv3(3 * base * scale // 2, k=3, s=1, p='same', b=b, drop_p=drop_p),
-            Conv3(2 * base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
+            Conv3(base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(3 * base // 2, k=3, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(2 * base, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv3d(12 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.final = nn.Sequential(
@@ -143,8 +142,7 @@ class A(nn.Module):
             nn.Dropout3d(p=drop_p)
         )
 
-    def forward(self, x, cat_in=None):
-        if self.reverse: x = torch.cat([x, cat_in], dim=1)
+    def forward(self, x):
         a1 = self.a1(x)
         a2 = self.a2(x)
         a3 = self.a3(x)
@@ -180,7 +178,7 @@ class redA(nn.Module):
 
 # ---------------------------------------------------------------------------------
 class B(nn.Module):
-    # 24b -> 24b, reverse (24 + 24)b -> 24b
+    # 24b -> 24b
     def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1):
         super(B, self).__init__()
         self.lin_act = lin_act
@@ -267,10 +265,11 @@ class C(nn.Module):
 
 # ---------------------------------------------------------------------------------
 class revB(nn.Module):
-    # 24b -> 24b, reverse (24 + 24)b -> 24b
-    def __init__(self, base, b=False, drop_p=-1.0, lin_act=0.1):
+    # (24 + 24)b -> 24b
+    def __init__(self, base, b=False, drop_p=-1.0, lin_act=0.1, attn=False):
         super(revB, self).__init__()
         self.lin_act = lin_act
+        self.attn = attn
         scale = 3
         self.b1 = Conv2(6 * base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.b2 = nn.Sequential(
@@ -279,9 +278,12 @@ class revB(nn.Module):
             Conv2(4 * base * scale, k=(7, 1), s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv2d(24 * base, kernel_size=1, stride=1, padding=0, bias=b)
-        self.compress = nn.Sequential(
-            Conv3(4 * base, k=(2, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(4 * base, k=1, s=1, p=0, b=b),
-        )
+
+        if attn:
+            self.compress = Attn(8 * base * scale, 4 * base * scale, 2, b=b) if N == 16 else Attn(8 * base * scale, 4 * base * scale, 1, b=b)
+        else:  # TODO: these need scale factor!
+            self.compress = nn.Sequential(Conv3(4 * base, k=(2, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(4 * base, k=1, s=1, p=0, b=b))
+
         self.final = nn.Sequential(
             nn.ReLU(),
             nn.Dropout3d(p=drop_p)
@@ -289,7 +291,10 @@ class revB(nn.Module):
 
     def forward(self, x, cat_in):
         printit(f'revB in: {x.shape}, {cat_in.shape}')
-        cat_in = self.compress(cat_in).squeeze(2)
+        if self.attn:
+            cat_in = self.compress(x, cat_in)
+        else:
+            cat_in = self.compress(cat_in).squeeze(2)
         printit(f'revb comp {cat_in.shape}')
         x_cat = torch.cat([x, cat_in], dim=1)
         b1 = self.b1(x_cat)
@@ -302,8 +307,9 @@ class revB(nn.Module):
 # ---------------------------------------------------------------------------------
 class revA(nn.Module):
     # 12b -> 12b, reverse (12 + 12)b -> 12b
-    def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1, reverse=False):
+    def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1, attn=False):
         super(revA, self).__init__()
+        self.attn = attn
         self.lin_act = lin_act
         scale = 3
         self.a1 = Conv2(base, k=1, s=1, p='same', b=b, drop_p=drop_p)
@@ -317,9 +323,11 @@ class revA(nn.Module):
             Conv2(base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv2d(12 * base, kernel_size=1, stride=1, padding=0, bias=b)
-        self.compress = nn.Sequential(
-            Conv3(2 * base, k=(4, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(2, 1, 1), s=1, p=0, b=b),
-        )
+
+        if attn:
+            self.compress = Attn(4 * base * scale, 2 * base * scale, 4, b=b) if N == 16 else Attn(4 * base * scale, 2 * base * scale, 2, b=b)
+        else:  # TODO: these need scale factor! or something better idk
+            self.compress = nn.Sequential(Conv3(2 * base, k=(4, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(2, 1, 1), s=1, p=0, b=b))
         self.final = nn.Sequential(
             nn.ReLU(),
             nn.Dropout3d(p=drop_p)
@@ -327,7 +335,10 @@ class revA(nn.Module):
 
     def forward(self, x, cat_in):
         printit(f'revA in: {x.shape}, {cat_in.shape}')
-        cat_in = self.compress(cat_in).squeeze(2)
+        if self.attn:
+            cat_in = self.compress(x, cat_in)
+        else:
+            cat_in = self.compress(cat_in).squeeze(2)
         printit(f'reva comp {cat_in.shape}')
         x_cat = torch.cat([x, cat_in], dim=1)
         a1 = self.a1(x_cat)
@@ -360,7 +371,7 @@ class revB(nn.Module):
         printit(f'Rev B in and cat in: {x.shape}, {cat_in.shape}')
         # this still work?
         cat_in = self.trim(cat_in)
-        printit("CAT", cat_in.shape)
+        printit('CAT', cat_in.shape)
         comb = torch.cat([x, cat_in], dim=1)
         rb1 = self.rb1(comb)
         rb2 = self.rb2(comb)
@@ -461,21 +472,26 @@ class revRB(nn.Module):
 # ---------------------------------------------------------------------------------
 class revS1(nn.Module):
     # (2 + 2)b -> 2b
-    def __init__(self, base, b=False, drop_p=0.0):
+    def __init__(self, base, b=False, drop_p=0.0, attn=False):
         super(revS1, self).__init__()
+        self.attn = attn
         p = 0 if N == 16 else 1
         self.rs1 = nn.Sequential(
             Conv2(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
             Conv2(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p, res=True),
             TConv2(base, k=3, s=1, p=p, op=0, b=b, drop_p=drop_p)
         )
-        self.compress = nn.Sequential(
-            Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(8, 1, 1), s=1, p=0, b=b)
-        )
+        if attn:
+            self.compress = Attn(4 * base, 2 * base, 14, b=b) if N == 16 else Attn(4 * base, 2 * base, 8, b=b)
+        else:
+            self.compress = nn.Sequential(Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(8, 1, 1), s=1, p=0, b=b))
 
     def forward(self, x, cat_in):
         printit(f'revS1: {x.shape, cat_in.shape}')
-        cat_in = self.compress(cat_in).squeeze(2)
+        if self.attn:
+            cat_in = self.compress(x, cat_in)
+        else:
+            cat_in = self.compress(cat_in).squeeze(2)
         printit(f'revs1 comp {cat_in.shape}')
         cat = torch.cat([x, cat_in], dim=1)
         return self.rs1(cat)
@@ -536,8 +552,9 @@ class revS2(nn.Module):
 # ---------------------------------------------------------------------------------
 class revS3(nn.Module):
     # (6 + 6)b -> 5b
-    def __init__(self, base, b=False, drop_p=0.0):
+    def __init__(self, base, b=False, drop_p=0.0, attn=False):
         super(revS3, self).__init__()
+        self.attn = attn
         self.rs3a = nn.Sequential(
             Conv2(3 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
             Conv2(2 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
@@ -548,13 +565,17 @@ class revS3(nn.Module):
             Conv2(3 * base, k=(7, 1), s=1, p=(3, 0), b=b, drop_p=drop_p, res=True),
             Conv2(3 * base, k=1, s=1, p=0, b=b, drop_p=drop_p, res=True)
         )
-        self.compress = nn.Sequential(
-            Conv3(3 * base, k=(7, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(3 * base, k=(4, 1, 1), s=1, p=0, b=b),
-        )
+        if attn:
+            self.compress = Attn(12 * base, 6 * base, 7, b=b) if N == 16 else Attn(12 * base, 6 * base, 4, b=b)
+        else:
+            self.compress = nn.Sequential(Conv3(6 * base, k=(7, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(6 * base, k=(4, 1, 1), s=1, p=0, b=b))
 
     def forward(self, x, cat_in):
         printit(f'revS3: {x.shape, cat_in.shape}')
-        cat_in = self.compress(cat_in).squeeze(2)
+        if self.attn:
+            cat_in = self.compress(x, cat_in)
+        else:
+            cat_in = self.compress(cat_in).squeeze(2)
         printit(f'revs3 comp {cat_in.shape}')
         cat = torch.cat([x, cat_in], dim=1)
         rs3a = self.rs3a(cat)
@@ -585,7 +606,7 @@ class revS4(nn.Module):
 
 # ---------------------------------------------------------------------------------
 class IRNv4_3DUNet(nn.Module):
-    def __init__(self, in_size, depth=42, Na=1, Nb=1, Nc=1, base=32, bias=False, drop_p=0.0, lin_act=0.1):
+    def __init__(self, in_size, depth=42, Na=1, Nb=1, Nc=1, base=32, bias=False, drop_p=0.0, lin_act=0.1, attn=False):
         """
         Na, Nb, Nc: number of times to run through layers A, B, C
         Inception-ResNet-v1/2 use 5, 10, 5
@@ -605,13 +626,13 @@ class IRNv4_3DUNet(nn.Module):
 
         # up layers
         self.rev_rb = revRB(base, b=bias, drop_p=drop_p)  # (B, 1152, ...
-        self.rev_b = revB(base, b=bias, drop_p=drop_p)  # (B, 1152, ... CAT
+        self.rev_b = revB(base, b=bias, drop_p=drop_p, attn=ATTN)  # (B, 1152, ... CAT
         self.rev_ra = revRA(base, b=bias, drop_p=drop_p)  # (B, 384, ...
-        self.rev_a = revA(base, b=bias, drop_p=drop_p)  # (B, 384, ... CAT
+        self.rev_a = revA(base, b=bias, drop_p=drop_p, attn=ATTN)  # (B, 384, ... CAT
         self.rev_s4 = revS4(base, b=bias, drop_p=drop_p)  # (B, 192, ...)
-        self.rev_s3 = revS3(base, b=bias, drop_p=drop_p)  # (B, 160, ...)  CAT
+        self.rev_s3 = revS3(base, b=bias, drop_p=drop_p, attn=ATTN)  # (B, 160, ...)  CAT
         self.rev_s2 = revS2(base, b=bias, drop_p=drop_p)  # (B, 128, ...)
-        self.rev_s1 = revS1(base, b=bias, drop_p=drop_p)  # (B, 5, ...)  CAT
+        self.rev_s1 = revS1(base, b=bias, drop_p=drop_p, attn=ATTN)  # (B, 5, ...)  CAT
 
         if ROI:
             self.final = nn.Sequential(
@@ -622,12 +643,10 @@ class IRNv4_3DUNet(nn.Module):
                 Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
                 Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
                 nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias),
-                #nn.Tanh()
             )
         else:
             self.final = nn.Sequential(
                 nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias),
-                #nn.Tanh(),
             )
 
         self.net_down = nn.ModuleList(

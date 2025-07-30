@@ -4,6 +4,36 @@ import torch.nn as nn
 EPS = 1e-5  # this is the default for BatchNorm
 
 # ---------------------------------------------------------------------------------
+class Attn(nn.Module):
+    def __init__(self, c_int, c_out, depth, b=False):
+        super(Attn, self).__init__()
+        self.squeeze = nn.Sequential(
+            Conv3(c_int, k=(depth, 1, 1), s=1, p=0, b=b),
+            nn.LazyBatchNorm3d(eps=EPS)
+        )
+        self.layer_sig = nn.Sequential(
+            Conv2(c_int, k=1, s=1, p=0, b=b), 
+            nn.LazyBatchNorm2d(eps=EPS)
+        )
+        self.gate_sig = nn.Sequential(
+            Conv2(c_int, k=1, s=1, p=0, b=b),
+            nn.LazyBatchNorm2d(eps=EPS)
+        )
+        self.relu = nn.ReLU()
+        self.psi = nn.Sequential(
+            Conv2(1, k=1, s=1, p=0, b=b),
+            nn.LazyBatchNorm2d(eps=EPS),
+            nn.Sigmoid()
+        )
+
+    def forward(self, gate, layer):
+        layer = self.squeeze(layer).squeeze(2)
+        g = self.gate_sig(gate)
+        l = self.layer_sig(layer)
+        out = self.relu(l + g)
+        return layer * self.psi(out)
+
+# ---------------------------------------------------------------------------------
 class Conv3(nn.Module):
     def __init__(self, c_out, k=3, s=1, p=1, d=1, b=False, drop_p=0.0, res=False):
         super(Conv3, self).__init__()
