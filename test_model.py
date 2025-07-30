@@ -24,7 +24,7 @@ from OTPrecipDataset import OTPrecipDataset
 from Networks import *
 from InceptUNet import IRNv4UNet
 from InceptUNet3D import IRNv4_3DUNet
-from v2 import UNet
+from v2 import MultiUNet
 
 sys.path.append('/home/eastinev/AI')
 import utils
@@ -32,6 +32,7 @@ import paths as pth
 
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 BIAS = False
+CLASSIFIER = False
 
 ## ================================================================================
 def main():
@@ -60,11 +61,11 @@ def main():
 
     weekly = True
     test_loader = prep_loader(exp, season, weekly, perturb_dict)
-    model = prep_model(model_name, model_id_tag, in_channels=5)
+    model = prep_model(model_name, model_id_tag, in_channels=6)
     model = load_model(model, model_name, model_id_tag, device)
 
     print(f'Running test experiment {note} on {model_id_tag}')
-    check_accuracy(model, model_name, test_loader, device, note=note)
+    check_accuracy(model, model_name, test_loader, device, exp, note=note)
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag, in_channels=64):
@@ -72,6 +73,7 @@ def prep_model(model_name, tag, in_channels=64):
     path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
     with open(path, 'r') as f:
         hps = json.load(f)
+    print(f'Loading hyperparams for model {model_name}:\n {hps}')
     Na, Nb, Nc = hps['Na'], hps['Nb'], hps['Nc']
     base = hps['base']
     lin_act = hps['lin_act']
@@ -85,7 +87,7 @@ def prep_model(model_name, tag, in_channels=64):
         case 'inc3d':
             return IRNv4_3DUNet(in_channels, depth=16, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
         case 'unet':
-            return UNet(16)
+            return MultiUNet(n_vars=5, depth=16, init_c=64, embedding_dim=32, bias=True)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
@@ -106,13 +108,8 @@ def load_model(model, model_name, tag, device):
     return model
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device, note=''):
-    monthly_bias = []
-    d_pred, d_obs, d_bias = [], [], []
-
-    # sumatra squall stuff
-    extent = (92.8, 107.2, 0.0, 8.0)
-    gridshape = (80, 144)  # (H, W)
+def check_accuracy(model, model_name, loader, device, exp, note=''):
+    gridshape = (54, 42)  # (H, W)
     accum_dict = {
         'DJF': [torch.zeros(gridshape)] * 3 + [0],
         'MAM': [torch.zeros(gridshape)] * 3 + [0],
@@ -120,29 +117,31 @@ def check_accuracy(model, model_name, loader, device, note=''):
         'SON': [torch.zeros(gridshape)] * 3 + [0],
     }
 
+    # Sumatra Squall MERRA2
+    # extent = (92.8, 107.2, 0.0, 8.0)
+
     # CUS 3D Inc MERRA2
     # extent = (-140, -50.625, 14, 53.5)  # full repr
-    # extent = (-108.75, -83.125, 24, 50.5)  # CUS ROI
-    # dlon, dlat = 0.625, 0.5
+    extent = (-108.75, -83.125, 24, 50.5)  # CUS ROI
 
-    # for zhang_repr CUS 2D Inc
+    # for zhang_repr CUS 2D Inc ERA5
     # extent = (-108, -84.25, 24, 47.75)
-    # dlon, dlat = 0.25, 0.25
 
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
-    plot_params = {'extent': extent, 'lons': lons, 'lats': lats}
+    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'vis_precip'}
 
     # select specific (or random) days
-    selected = [(1989, 7, 14), (2012, 4, 12), (1982, 7, 15), (2008, 6, 24), (2000, 6, 14)]
+    selected = [(1984, 6, 13), (1983, 6, 15), (1982, 4, 20), (2007, 3, 11), (1989, 7, 11)]  #, (1987, 6, 13)] overfit test
     # selected = [(np.random.choice(np.arange(1980, 2021)), np.random.choice(np.arange(4, 12)), np.random.choice(np.arange(1, 31))) for _ in range(4)]  # select 4 random days
     # Known Sumatra Squall events (not in test apparently)
     # selected = [(2016, 7, 12), (2014, 6, 11), (2014, 6, 12)]
-    if os.path.exists('./agg_norm_vars.json'):
-        with open('./agg_norm_vars.json', 'r') as f:
-            stats = json.load(f)
-    p_mean = stats['precipitationmn']
-    p_std = stats['precipitationstd']
-    spd = 4
+    spd = 8
+
+    # For un-standardizing predicted/target precip data
+    with open(f'./{exp}_norm_vars.json', 'r') as f:
+        stats = json.load(f)
+    mn_p = stats['precipitationmn']
+    std_p = stats['precipitationstd']
 
     test_loss = 0
     model = model.to(device)
@@ -152,10 +151,8 @@ def check_accuracy(model, model_name, loader, device, note=''):
             print(f'Testing model on {utils.get_time_str(time_id)}...')
             source, target = source.to(device=device), target.to(device=device)
             pred = model(source)
-            #pred, target = torch.exp(pred) - 1, torch.exp(target) - 1  # correct for log-norm prediction 
-            target = target * p_std + p_mean
-            pred = pred * p_std + p_mean
-            loss = F.mse_loss(pred, target)  # just check pixelwise MSE
+            pred, target = pred * std_p + mn_p, target * std_p + mn_p
+            loss = F.mse_loss(pred, target)
             test_loss += loss.item()
 
             if BIAS:

@@ -10,8 +10,8 @@ class Conv3(nn.Module):
         self.res = res
         self.net = nn.Sequential(
             nn.LazyConv3d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
-            nn.SELU(),
-            # nn.LazyBatchNorm3d(eps=EPS),
+            nn.ReLU(),
+            nn.LazyBatchNorm3d(eps=EPS),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -28,8 +28,8 @@ class Conv2(nn.Module):
         self.res = res
         self.net = nn.Sequential(
             nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
-            nn.SELU(),
-            # nn.LazyBatchNorm2d(eps=EPS),
+            nn.ReLU(),
+            nn.LazyBatchNorm2d(eps=EPS),
             nn.Dropout2d(p=drop_p)
         )
 
@@ -48,8 +48,8 @@ class TConv3(nn.Module):
         self.p = p
         self.net = nn.Sequential(
             nn.LazyConvTranspose3d(c_out, kernel_size=k, stride=s, padding=p, output_padding=op, bias=b),
-            nn.SELU(),
-            # nn.LazyBatchNorm3d(eps=EPS),
+            nn.ReLU(),
+            nn.LazyBatchNorm3d(eps=EPS),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -62,8 +62,8 @@ class TConv2(nn.Module):
         super(TConv2, self).__init__()
         self.net = nn.Sequential(
             nn.LazyConvTranspose2d(c_out, kernel_size=k, stride=s, padding=p, output_padding=op, bias=b),
-            nn.SELU(),
-            # nn.LazyBatchNorm2d(eps=EPS),
+            nn.ReLU(),
+            nn.LazyBatchNorm2d(eps=EPS),
             nn.Dropout2d(p=drop_p)
         )
         
@@ -76,7 +76,7 @@ class SelectionUnit2(nn.Module):
     def __init__(self, c_out):
         super(SelectionUnit2, self).__init__()
         self.net = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.LazyConv2d(c_out, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Sigmoid()
         )
@@ -90,7 +90,7 @@ class SelectionUnit3(nn.Module):
     def __init__(self, c_out):
         super(SelectionUnit3, self).__init__()
         self.net = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.LazyConv3d(c_out, kernel_size=1, stride=1, padding=0, bias=False),
             nn.Sigmoid()
         )

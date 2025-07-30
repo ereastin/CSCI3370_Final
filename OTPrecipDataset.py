@@ -22,10 +22,11 @@ from functools import partial
 
 STATS = False
 NORM = True
-ROI = False
+ROI = True
 FORECAST = False
-AGG = True  # aggregate to 6-hourly.. 3-hourly too hard.?
+AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
 RM_VARS = [] #['U', 'V', 'T', 'QV']
+CLASSIFIER = False
 
 ## ================================================================================
 def main():
@@ -36,16 +37,16 @@ def main():
     with Client(cluster) as client:
         print(client, flush=True)
         # NOTE: if running monthly.. each month LSF + P ~ 5G
-        pd = OTPrecipDataset('prep', 'inc3d_reana', season='both', weekly=True, shuffle=False)
+        pd = OTPrecipDataset('train', 'inc3d_reana', season='both', weekly=True, shuffle=False)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
+            print(s.shape, t.shape)
             print(tt, flush=True)
+            break
 
-        # TODO: so this works BUT lon/lat def -180:180/90:-90 so either shift or pay attention to slice order
-        # also mswep stuff is in 'center' of 0.1x0.1 square.? so shift by 0.05 in interp?
         t2 = time.time()
 
-    if STATS: pd.get_stats()  # TODO: was this ever run for random weekly stuff
+    if STATS: pd.get_stats()
     print('time:', (t2 - t1))
 
 ## ================================================================================
@@ -65,20 +66,15 @@ class OTPrecipDataset(Dataset):
         else:
             self.n_months = 8
             mnth_offset = 4
-        #self.n_months = 8 # gonna do apr-nov, most common sumatra squall months # 6 if season == 'both' else 3
+
         yrs = list(range(1980, 2021))
-        #mnth_offset = 4 #6 if season == 'sum' else 3
         mnths = list(range(mnth_offset, mnth_offset + self.n_months))
         wks = list(range(4))
+
         if self.weekly:
             t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
-            if self.exp == 'inc3d_ss':
-                for i in range(4):
-                    t_strs.pop(t_strs.index((2020, 9, i)))
         else:  # monthly
             t_strs = [(l[0], l[1]) for l in list(product(yrs, mnths))]
-            if self.exp == 'inc3d_ss':
-                t_strs.pop(t_strs.index((2020, 9)))
 
         # fix the seed, at least one shuffle is the same everytime AFAIK..
         if self.mode != 'prep':
@@ -91,14 +87,16 @@ class OTPrecipDataset(Dataset):
         if d > 0:
             v += 1
             te += 1
-        # NOTE: these may not add to len(t_strs) but should cover dataset bc te not used
 
+        # NOTE: these may not add to len(t_strs) but should cover dataset bc te not used
         match mode:
             case 'train':
+                #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[:tr]
             case 'val':
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
+                #self.t_strs = t_strs[1:2]
                 self.t_strs = t_strs[tr + v:]
             case 'prep':
                 self.t_strs = t_strs
@@ -111,7 +109,7 @@ class OTPrecipDataset(Dataset):
         self.ctr = 0
         if STATS:
             self.t_strs = np.asarray(self.t_strs)
-            smpl = int(0.10 * len(self.t_strs))
+            smpl = int(0.25 * len(self.t_strs))
             print(f'sampling {smpl} of {len(t_strs)} weeks')
             rnd_idx = rng.integers(len(self.t_strs), size=smpl)
             self.t_strs = self.t_strs[rnd_idx]
@@ -131,13 +129,10 @@ class OTPrecipDataset(Dataset):
         self.merra_lats = slice(14, 53.5)
         self.merra_lons = slice(-140, -50.625)
         # sumatra squall
-        self.mls = -15.5
-        self.pls = 7.95 
         #self.merra_lats = slice(-15.5, 24)
         #self.merra_lons = slice(55, 144.625)
-        self.merra_drop_vars = ['H', 'EPV', 'SLP', 'PS', 'RH', 'PHIS', 'O3', 'QI', 'QL'] # NOTE: can use RH instead of Q..
-        #self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
-        self.merra_vars = ['U', 'V', 'OMEGA', 'T', 'QV']
+        self.merra_drop_vars = ['EPV', 'SLP', 'PS', 'RH', 'PHIS', 'O3', 'QI', 'QL'] # NOTE: can use RH instead of Q..
+        self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
         #self.p = np.array([
         #    1000, 975, 950, 925, 900, 875, 850,
         #    825, 800, 775, 750, 725, 700, 650,
@@ -145,6 +140,8 @@ class OTPrecipDataset(Dataset):
         #    250, 200, 150, 100, 70, 50, 40,
         #    30, 20, 10, 7, 5, 4, 3
         #])
+        # from zhang repr... try just using these 8/similar.? maybe just too many features
+        self.sel_p = np.array([1000, 975, 925, 850, 750, 550, 450, 250])
         self.p = np.array([
             1000, 975, 950, 925, 900, 875, 850,
             800, 750, 650, 550, 450, 350, 250, 150, 100
@@ -162,15 +159,16 @@ class OTPrecipDataset(Dataset):
         self.mswep_drop_vars = []
 
         ## For variables statistics/data norm
-        # NOTE: these stats for sumatra squall stuff
-        self._merra_stats = {k + 'mn': [] for k in self.merra_vars} | {k + 'std': [] for k in self.merra_vars}
-        self._merra_stats['precipitationmn'] = []
-        self._merra_stats['precipitationstd'] = []
-        # TODO: fix this!
-        self.stats_pth = './agg_norm_vars.json' if AGG else './norm_vars.json'
+        self._stats = {k + 'mn': [] for k in self.merra_vars} | {k + 'var': [] for k in self.merra_vars}
+        self._stats['Nv'] = []
+        self._stats['precipitationmn'] = []
+        self._stats['precipitationvar'] = []
+        self._stats['Np'] = []
+
+        self.stats_pth = f'./{self.exp}_agg_norm_vars.json' if AGG else f'./{self.exp}_norm_vars.json'
         if os.path.exists(self.stats_pth):
             with open(self.stats_pth, 'r') as f:
-                self.merra_stats = json.load(f)
+                self.stats = json.load(f)
 
     # -----------------------------------------------------------------------------
     def __len__(self):
@@ -197,6 +195,7 @@ class OTPrecipDataset(Dataset):
             curr_files = os.listdir(os.path.join(pth.SCRATCH, self.exp))
             os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
             merra_files, mswep_files = self._get_files_by_time(year, month, week)
+            # write source
             try:
                 if not source_rw_pth.split(os.sep)[-1] in curr_files:
                     self.write_source(
@@ -210,6 +209,8 @@ class OTPrecipDataset(Dataset):
                     )
             except Exception as e:
                 print(f'MERRA {source_rw_pth} failed', e)
+
+            # write target
             try:
                 if not target_rw_pth.split(os.sep)[-1] in curr_files:
                     self.write_target(
@@ -224,6 +225,7 @@ class OTPrecipDataset(Dataset):
             except Exception as e:
                 print(f'MSWEP {target_rw_pth} failed', e)
             return (None, None, time_id)
+
         else:
             try:
                 source = self.read_source(
@@ -339,7 +341,22 @@ class OTPrecipDataset(Dataset):
     def get_stats(self):
         print('writing var stats...')
         with open(self.stats_pth, 'w') as f:
-            stats_dump = {k: np.mean(v) for (k, v) in self._merra_stats.items()}
+            Nv = np.asarray(self._stats.pop('Nv'))
+            Np = np.asarray(self._stats.pop('Np'))
+            stats_dump = {}
+            for v in self.merra_vars:
+                mn, vr = np.asarray(self._stats[v + 'mn']), np.asarray(self._stats[v + 'var'])
+                comb_mn = np.sum(Nv * mn) / np.sum(Nv)
+                stats_dump[v + 'mn'] = comb_mn
+                qc = np.sum((Nv - 1) * vr + Nv * mn ** 2)
+                stats_dump[v + 'std'] = np.sqrt((qc - np.sum(Nv) * comb_mn ** 2) / (np.sum(Nv) - 1))
+
+            mn, vr = np.asarray(self._stats['precipitationmn']), np.asarray(self._stats['precipitationvar'])
+            comb_mn = np.sum(Np * mn) / np.sum(Np)
+            stats_dump['precipitationmn'] = comb_mn
+            qc = np.sum((Np - 1) * vr + Np * mn ** 2)
+            stats_dump['precipitationstd'] = np.sqrt((qc - np.sum(Np) * comb_mn ** 2) / (np.sum(Np) - 1))
+
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
@@ -357,8 +374,9 @@ class OTPrecipDataset(Dataset):
         match perturb_type:
             case 'zero':
                 # set values to zero (e.g. winds, q are 'reasonable', removing convection/advection, removing moisture)
+                # or name as 'assign' and use for all e.g. subsidence everywhere?
                 ds[perturb_var].loc[dict(lev=plvls)] = 0
-            case 'scale':
+            case 'scale':  # can also use to invert sign
                 ds[perturb_var].loc[dict(lev=plvls)] *= scale
             case 'vshear':  # low-level vertical wind shear thought to be important for MCS (Rotunno '88), also LLJs for moisture?
                 # remove per-column vertical shear -> set field at each cell to mean of cell across p-lvls
@@ -366,7 +384,15 @@ class OTPrecipDataset(Dataset):
             case 'hshear':
                 # remove horizontal shear -> set field at each p-lvl to mean of p-lvl
                 ds[perturb_var].loc[dict(lev=plvls)] = ds[perturb_var].mean(dim=['lat', 'lon'])
-            # TODO: any other perturbations make sense?
+            case 'shuffle':
+                k = 8  # adjust this for different scale importance
+                for i in range(0, len(lats), k):
+                    for j in range(0, len(lons), k):
+                        for p in range(0, len(plvls)):
+                            slat, slon = slice(i, i + k), slice(j, j + k)
+                            v = ds[perturb_var].isel(lat=slat, lon=slon, lev=p).values[()].flatten()
+                            np.random.shuffle(v)
+                            ds[perturb_var].loc[dict(lat=lats[slat], lon=lons[slon], lev=plvls[p])] = v.reshape((k, k))
 
         return ds
 
@@ -397,7 +423,7 @@ class OTPrecipDataset(Dataset):
         # do nan interp
         ds0 = ds[['U', 'V', 'OMEGA', 'QV']].fillna(value=0)
         # NOTE: not sure this is the best way to handle but other options? interpolate below ground?
-        dsBF = ds[['T']].bfill(dim='lev')
+        dsBF = ds[['T', 'H']].bfill(dim='lev')
         ds = xr.merge([ds0, dsBF])
         ds = self._regrid(ds, regrid_dict)
         ds = ds.compute()
@@ -415,15 +441,20 @@ class OTPrecipDataset(Dataset):
         if STATS:
             for v in self.merra_vars:
                 dav = ds[v]
-                self._merra_stats[v + 'mn'].append(dav.mean().data)
-                self._merra_stats[v + 'std'].append(dav.std().data)
+                self._stats[v + 'mn'].append(dav.mean().data)
+                self._stats[v + 'var'].append(dav.var().data)
+            self._stats['Nv'].append(dav.count().data)
             return
 
         if NORM:
+            # select for feqer p-levels
+            ds = ds.sel(lev=self.sel_p)
             for v in self.merra_vars:
                 if v in RM_VARS:
                     continue
-                ds[v] = (ds[v] - self.merra_stats[v + 'mn']) / self.merra_stats[v + 'std']
+                ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
+        #if ROI:
+        #    ds = ds.sel(lat=slice(24, 50.5), lon=slice(-108.75, -83.125))
 
         data = ds.to_dataarray().to_numpy()
         source = torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
@@ -463,18 +494,30 @@ class OTPrecipDataset(Dataset):
         if STATS:
             v = 'precipitation'
             dav = ds[v]
-            self._merra_stats[v + 'mn'].append(dav.mean().data)
-            self._merra_stats[v + 'std'].append(dav.std().data)
+            self._stats[v + 'mn'].append(dav.mean().data)
+            self._stats[v + 'var'].append(dav.var().data)
+            self._stats['Np'].append(dav.count().data)
             return
 
-        if NORM:
+        if NORM and not CLASSIFIER:
+            #pass
             v = 'precipitation'
-            ds[v] = (ds[v] - self.merra_stats[v + 'mn']) / self.merra_stats[v + 'std']
-            #target = torch.where(target > 24, 24, target)  # 12 mm per hour
-            #target = torch.log(target + 1)
+            ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
         
         data = ds.to_dataarray().to_numpy()
         target = torch.tensor(data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
+
+        if CLASSIFIER:
+            # NOTE: cleaner way to do this..?
+            s = 6 if AGG else 3
+            target = torch.where(target > 3, 1, 0)
+            #target = torch.where(target == 0, 0, target)
+            #target = torch.where((target > 0) & (target < 2.5 * s), 1, target)  # light rain
+            #target = torch.where((target >= 2.5 * s) & (target < 7.5 * s), 2, target)  # moderate rain
+            #target = torch.where((target >= 7.5 * s) & (target < 50 * s), 3, target)  # heavy rain
+            #target = torch.where(target >= 50 * s, 4, target)  # violent rain
+            target = target.squeeze(1)
+
         return target
  
     ## ============================================================================

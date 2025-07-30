@@ -5,10 +5,11 @@ from torchinfo import summary
 from Components import *
 
 PRINT = False
-ROI = False
+ROI = True
+N, D, H, W = 6, 8, 80, 144
 # ---------------------------------------------------------------------------------
 def main():
-    base = 32
+    base = 36
     lin_act = 0.117
     Na, Nb, Nc = 5, 10, 5  #3, 6, 3
     lr = 2.44e-04
@@ -22,12 +23,12 @@ def main():
     #print(calc_shape_out(35, 0, 1, 18, 1))
     #exit()
 
-    net = IRNv4_3DUNet(5, depth=16, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
+    net = IRNv4_3DUNet(N, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
     #print(net)
-    test = torch.ones(1, 5, 16, 80, 144).cuda()
+    test = torch.ones((1, N, D, H, W)).cuda()
     net(test)
     #print(net)  doing 54, 42 is just too small with all the downsampling..
-    s = (64, 5, 16, 80, 144)
+    s = (64, N, D, H, W)
     summary(net, input_size=s)
     # TODO: handle padding/output padding stuff better! this will only work for known input shape
     #  need to somehow figure out even vs. odd shapes how to handle padding
@@ -50,10 +51,10 @@ class S1(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(S1, self).__init__()
         self.stem_a = nn.Sequential(
-            Conv3(base, k=(3, 1, 1), s=1, p='same', d=3, b=b),
-            Conv3(base, k=(1, 3, 1), s=1, p='same', d=5, b=b),
-            Conv3(base, k=(1, 1, 3), s=1, p='same', d=5, b=b),
-            Conv3(2 * base, k=3, s=1, p=0, b=b, drop_p=drop_p)
+            Conv3(base, k=(3, 1, 1), s=1, p='same', d=3, b=b, drop_p=drop_p),
+            Conv3(base, k=(1, 3, 1), s=1, p='same', d=5, b=b, drop_p=drop_p),
+            Conv3(base, k=(1, 1, 3), s=1, p='same', d=5, b=b, drop_p=drop_p),
+            Conv3(2 * base, k=3, s=1, p=0, b=b, drop_p=drop_p) if N == 16 else nn.Identity()
             #Conv3(2 * base, k=3, s=2, p=1, b=b, drop_p=drop_p),
             #Conv3(base, k=3, s=2, p=1, b=b),
             # TODO: not sure this above actually here.? my original impl didnt reduce here
@@ -70,8 +71,8 @@ class S2(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(S2, self).__init__()
         self.stem_b1 = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
-        self.stem_b2 = Conv3(3 * base, k=3, s=2, p=1, b=b)
-        self.drop = nn.Dropout3d(p=drop_p)
+        self.stem_b2 = Conv3(3 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
+        self.drop = nn.Identity() #nn.Dropout3d(p=drop_p)
 
     def forward(self, x):
         b1 = self.stem_b1(x)
@@ -85,17 +86,17 @@ class S3(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(S3, self).__init__()
         self.stem_c1 = nn.Sequential(
-            Conv3(2 * base, k=1, s=1, p='same', b=b),
-            Conv3(3 * base, k=3, s=1, p='same', b=b)
+            Conv3(2 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(3 * base, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.stem_c2 = nn.Sequential(
-            Conv3(2 * base, k=1, s=1, p='same', b=b),
-            Conv3(2 * base, k=(1, 7, 1), s=1, p='same', b=b),
-            Conv3(2 * base, k=(1, 1, 7), s=1, p='same', b=b),
-            Conv3(2 * base, k=(7, 1, 1), s=1, p='same', b=b),
-            Conv3(3 * base, k=3, s=1, p='same', b=b)
+            Conv3(2 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(2 * base, k=(1, 7, 1), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(2 * base, k=(1, 1, 7), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(2 * base, k=(7, 1, 1), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(3 * base, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
-        self.drop = nn.Dropout3d(p=drop_p)
+        self.drop = nn.Identity() #nn.Dropout3d(p=drop_p)
 
     def forward(self, x):
         c1 = self.stem_c1(x)
@@ -108,9 +109,9 @@ class S4(nn.Module):
     # 6b -> 12b
     def __init__(self, base, b=False, drop_p=0.0):
         super(S4, self).__init__()
-        self.stem_d1 = Conv3(6 * base, k=3, s=2, p=1, b=b)
+        self.stem_d1 = Conv3(6 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         self.stem_d2 = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
-        self.drop = nn.Dropout3d(p=drop_p)
+        self.drop = nn.Identity() #nn.Dropout3d(p=drop_p)
 
     def forward(self, x):
         d1 = self.stem_d1(x)
@@ -126,19 +127,19 @@ class A(nn.Module):
         self.lin_act = lin_act
         self.reverse = reverse
         scale = 2 if self.reverse else 1
-        self.a1 = Conv3(base * scale, k=1, s=1, p='same', b=b)
+        self.a1 = Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.a2 = nn.Sequential(
-            Conv3(base * scale, k=1, s=1, p='same', b=b),
-            Conv3(base * scale, k=3, s=1, p='same', b=b)
+            Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.a3 = nn.Sequential(
-            Conv3(base * scale, k=1, s=1, p='same', b=b),
-            Conv3(3 * base * scale // 2, k=3, s=1, p='same', b=b),
-            Conv3(2 * base * scale, k=3, s=1, p='same', b=b)
+            Conv3(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(3 * base * scale // 2, k=3, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(2 * base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv3d(12 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -158,16 +159,17 @@ class redA(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(redA, self).__init__()
         self.ra1 = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
-        self.ra2 = Conv3(6 * base, k=3, s=2, p=1, b=b)
+        self.ra2 = Conv3(6 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         self.ra3 = nn.Sequential(
-            Conv3(4 * base, k=1, s=1, p='same', b=b),
-            Conv3(4 * base, k=3, s=1, p='same', b=b),
-            Conv3(6 * base, k=3, s=2, p=1, b=b)
+            Conv3(4 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(4 * base, k=3, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(6 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         )
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout3d(p=drop_p)
-        )
+        self.final = nn.Identity()
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout3d(p=drop_p)
+        #)
 
     def forward(self, x):
         ra1 = self.ra1(x)
@@ -182,16 +184,16 @@ class B(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1):
         super(B, self).__init__()
         self.lin_act = lin_act
-        self.b1 = Conv3(6 * base, k=1, s=1, p='same', b=b)
+        self.b1 = Conv3(6 * base, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.b2 = nn.Sequential(
-            Conv3(4 * base, k=1, s=1, p='same', b=b),
-            Conv3(5 * base, k=(1, 7, 1), s=1, p='same', b=b),
-            Conv3(6 * base, k=(1, 1, 7), s=1, p='same', b=b),
-            Conv3(7 * base, k=(7, 1, 1), s=1, p='same', b=b)  # consider this?
+            Conv3(4 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(5 * base, k=(1, 7, 1), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(6 * base, k=(1, 1, 7), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(7 * base, k=(7, 1, 1), s=1, p='same', b=b, drop_p=drop_p)  # consider this?
         )
         self.comb = nn.LazyConv3d(24 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -210,22 +212,23 @@ class redB(nn.Module):
         super(redB, self).__init__()
         self.rb1 = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
         self.rb2 = nn.Sequential(
-            Conv3(6 * base, k=1, s=1, p='same', b=b),
-            Conv3(7 * base, k=3, s=2, p=1, b=b)
+            Conv3(6 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(7 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         )
         self.rb3 = nn.Sequential(
-            Conv3(6 * base, k=1, s=1, p='same', b=b),
-            Conv3(8 * base, k=3, s=2, p=1, b=b)
+            Conv3(6 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(8 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         )
         self.rb4 = nn.Sequential(
-            Conv3(6 * base, k=1, s=1, p='same', b=b),
-            Conv3(7 * base, k=3, s=1, p='same', b=b),
-            Conv3(9 * base, k=3, s=2, p=1, b=b)
+            Conv3(6 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(7 * base, k=3, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(9 * base, k=3, s=2, p=1, b=b, drop_p=drop_p)
         )
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout3d(p=drop_p)
-        )
+        self.final = nn.Identity()
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout3d(p=drop_p)
+        #)
 
     def forward(self, x):
         rb1 = self.rb1(x)
@@ -241,16 +244,16 @@ class C(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0, lin_act=0.1):
         super(C, self).__init__()
         self.lin_act = lin_act
-        self.c1 = Conv3(6 * base, k=1, s=1, p=0, b=b)
+        self.c1 = Conv3(6 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
         self.c2 = nn.Sequential(
-            Conv3(6 * base, k=1, s=1, p='same', b=b),
-            Conv3(7 * base, k=(1, 1, 3), s=1, p='same', b=b),
-            Conv3(8 * base, k=(1, 3, 1), s=1, p='same', b=b),
-            Conv3(9 * base, k=(3, 1, 1), s=1, p='same', b=b),  # consider
+            Conv3(6 * base, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(7 * base, k=(1, 1, 3), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(8 * base, k=(1, 3, 1), s=1, p='same', b=b, drop_p=drop_p),
+            Conv3(9 * base, k=(3, 1, 1), s=1, p='same', b=b, drop_p=drop_p),  # consider
         )
         self.comb = nn.LazyConv3d(48 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -269,18 +272,18 @@ class revB(nn.Module):
         super(revB, self).__init__()
         self.lin_act = lin_act
         scale = 3
-        self.b1 = Conv2(6 * base * scale, k=1, s=1, p='same', b=b)
+        self.b1 = Conv2(6 * base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.b2 = nn.Sequential(
-            Conv2(7 * base * scale, k=1, s=1, p='same', b=b),
-            Conv2(5 * base * scale, k=(1, 7), s=1, p='same', b=b),
-            Conv2(4 * base * scale, k=(7, 1), s=1, p='same', b=b)
+            Conv2(7 * base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv2(5 * base * scale, k=(1, 7), s=1, p='same', b=b, drop_p=drop_p),
+            Conv2(4 * base * scale, k=(7, 1), s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv2d(24 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.compress = nn.Sequential(
-            Conv3(4 * base, k=(2, 1, 1), s=1, p=0, b=b),
+            Conv3(4 * base, k=(2, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(4 * base, k=1, s=1, p=0, b=b),
         )
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -303,22 +306,22 @@ class revA(nn.Module):
         super(revA, self).__init__()
         self.lin_act = lin_act
         scale = 3
-        self.a1 = Conv2(base, k=1, s=1, p='same', b=b)
+        self.a1 = Conv2(base, k=1, s=1, p='same', b=b, drop_p=drop_p)
         self.a2 = nn.Sequential(
-            Conv2(base * scale, k=1, s=1, p='same', b=b),
-            Conv2(base * scale, k=3, s=1, p='same', b=b)
+            Conv2(base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv2(base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.a3 = nn.Sequential(
-            Conv2(2 * base * scale, k=1, s=1, p='same', b=b),
-            Conv2(3 * base * scale // 2, k=3, s=1, p='same', b=b),
-            Conv2(base * scale, k=3, s=1, p='same', b=b)
+            Conv2(2 * base * scale, k=1, s=1, p='same', b=b, drop_p=drop_p),
+            Conv2(3 * base * scale // 2, k=3, s=1, p='same', b=b, drop_p=drop_p),
+            Conv2(base * scale, k=3, s=1, p='same', b=b, drop_p=drop_p)
         )
         self.comb = nn.LazyConv2d(12 * base, kernel_size=1, stride=1, padding=0, bias=b)
         self.compress = nn.Sequential(
-            Conv3(2 * base, k=(4, 1, 1), s=1, p=0, b=b),
+            Conv3(2 * base, k=(4, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(2, 1, 1), s=1, p=0, b=b),
         )
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -348,7 +351,7 @@ class revB(nn.Module):
             TConv2(in_size // 7, k=1, s=1, p=0, b=b, res=True)
         )
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout2d(p=drop_p)
         )
         self.trim = nn.MaxPool2d(kernel_size=2, stride=1, padding=0)
@@ -382,7 +385,7 @@ class revA(nn.Module):
             TConv2(in_size // 5, k=1, s=1, p=0, b=b, res=True)
         )
         self.final = nn.Sequential(
-            nn.SELU(),
+            nn.ReLU(),
             nn.Dropout2d(p=drop_p)
         )
 
@@ -403,16 +406,17 @@ class revRA(nn.Module):
     def __init__(self, base, op=1, b=False, drop_p=0.0):
         super(revRA, self).__init__()
         # self.rra1 = nn.Upsample(size=(10, 18))  # if this module is reduce channels by half cant use this..
-        self.rra2 = TConv2(6 * base, k=3, s=2, p=1, op=1, b=b)
+        self.rra2 = TConv2(6 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p)
         self.rra3 = nn.Sequential(
-            Conv2(4 * base, k=1, s=1, p=0, b=b),
-            Conv2(4 * base, k=3, s=1, p=1, b=b, res=True),
-            TConv2(6 * base, k=3, s=2, p=1, op=1, b=b),
+            Conv2(4 * base, k=1, s=1, p=0, b=b, drop_p=drop_p),
+            Conv2(4 * base, k=3, s=1, p=1, b=b, res=True, drop_p=drop_p),
+            TConv2(6 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p),
         )
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout2d(p=drop_p)
-        )
+        self.final = Conv2(12 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout2d(p=drop_p)
+        #)
 
     def forward(self, x):
         #rra1 = self.rra1(x)
@@ -428,22 +432,23 @@ class revRB(nn.Module):
         super(revRB, self).__init__()
         # self.rrb1 = nn.Upsample(scale_factor=2)  # just remove the upsample.?
         self.rrb2 = nn.Sequential(
-            Conv2(10 * base, k=1, s=1, p=0, b=b),
-            TConv2(7 * base, k=3, s=2, p=1, op=1, b=b),
+            Conv2(10 * base, k=1, s=1, p=0, b=b, drop_p=drop_p),
+            TConv2(7 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p),
         )
         self.rrb3 = nn.Sequential(
-            Conv2(10 * base, k=1, s=1, p=0, b=b),
-            TConv2(8 * base, k=3, s=2, p=1, op=1, b=b),
+            Conv2(10 * base, k=1, s=1, p=0, b=b, drop_p=drop_p),
+            TConv2(8 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p),
         )
         self.rrb4 = nn.Sequential(
-            Conv2(11 * base, k=3, s=1, p=1, b=b),
-            Conv2(10 * base, k=1, s=1, p=0, b=b),
-            TConv2(9 * base, k=3, s=2, p=1, op=1, b=b),
+            Conv2(11 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
+            Conv2(10 * base, k=1, s=1, p=0, b=b, drop_p=drop_p),
+            TConv2(9 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p),
         )
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout2d(p=drop_p)
-        )
+        self.final = Conv2(24 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout2d(p=drop_p)
+        #)
 
     def forward(self, x):
         #rrb1 = self.rrb1(x)
@@ -458,13 +463,14 @@ class revS1(nn.Module):
     # (2 + 2)b -> 2b
     def __init__(self, base, b=False, drop_p=0.0):
         super(revS1, self).__init__()
+        p = 0 if N == 16 else 1
         self.rs1 = nn.Sequential(
-            Conv2(2 * base, k=3, s=1, p=1, b=b),
-            Conv2(2 * base, k=3, s=1, p=1, b=b, res=True),
-            TConv2(base, k=3, s=1, p=0, op=0, b=b, drop_p=drop_p)
+            Conv2(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
+            Conv2(2 * base, k=3, s=1, p=1, b=b, drop_p=drop_p, res=True),
+            TConv2(base, k=3, s=1, p=p, op=0, b=b, drop_p=drop_p)
         )
         self.compress = nn.Sequential(
-            Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b),
+            Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(2 * base, k=(8, 1, 1), s=1, p=0, b=b)
         )
 
     def forward(self, x, cat_in):
@@ -480,26 +486,27 @@ class revS1_ROI(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(revS1_ROI, self).__init__()
         self.rs1 = nn.Sequential(
-            Conv2(2 * base, k=(3, 5), s=1, p='same', b=b),
+            Conv2(2 * base, k=(3, 5), s=1, p='same', b=b, drop_p=drop_p),
             Conv2(2 * base, k=(5, 3), s=1, p='same', b=b, drop_p=drop_p, res=True),
         )
         self.rs2 = nn.Sequential(
-            Conv2(2 * base, k=(3, 5), s=1, p='same', b=b),
+            Conv2(2 * base, k=(3, 5), s=1, p='same', b=b, drop_p=drop_p),
             Conv2(2 * base, k=(5, 3), s=1, p='same', b=b, drop_p=drop_p, res=True),
         )
         self.rs3 = nn.Sequential(
-            Conv2(2 * base, k=3, s=1, p=0, b=b),
-            Conv2(2 * base, k=3, s=1, p=0, b=b),
+            Conv2(2 * base, k=3, s=1, p=0, b=b, drop_p=drop_p),
+            Conv2(2 * base, k=3, s=1, p=0, b=b, drop_p=drop_p),
         )
         self.compress = nn.Sequential(
-            Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b),
+            Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b, drop_p=drop_p),
         )
 
     def forward(self, x, cat_in):
-        cat_in = self.compress(cat_in)
+        cat_in = self.compress(cat_in).squeeze(2)
         printit(f'revs1 comp {cat_in.shape}')
         cat = torch.cat([x, cat_in], dim=1)
         s = cat.shape
+        printit(f'out cat shape: {s}')
         cat = cat.reshape(s[0], s[1], 60, 48)  # dont love the hard coded or the reshape this far down..
         out = self.rs1(cat)
         out = self.rs2(out)
@@ -511,11 +518,12 @@ class revS2(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(revS2, self).__init__()
         #self.rs2a = nn.Upsample(scale_factor=2)
-        self.rs2b = TConv2(2 * base, k=3, s=2, p=1, op=1, b=b)
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout2d(p=drop_p)
-        )
+        self.rs2b = TConv2(2 * base, k=3, s=2, p=1, op=1, b=b, drop_p=drop_p)
+        self.final = nn.Identity()
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout2d(p=drop_p)
+        #)
 
     def forward(self, x):
         #rs2a = self.rs2a(x)
@@ -531,17 +539,17 @@ class revS3(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(revS3, self).__init__()
         self.rs3a = nn.Sequential(
-            Conv2(3 * base, k=3, s=1, p=1, b=b),
+            Conv2(3 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
             Conv2(2 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
         )
         self.rs3b = nn.Sequential(
-            Conv2(3 * base, k=3, s=1, p=1, b=b),
-            Conv2(3 * base, k=(1, 7), s=1, p=(0, 3), b=b, res=True),
-            Conv2(3 * base, k=(7, 1), s=1, p=(3, 0), b=b, res=True),
+            Conv2(3 * base, k=3, s=1, p=1, b=b, drop_p=drop_p),
+            Conv2(3 * base, k=(1, 7), s=1, p=(0, 3), b=b, drop_p=drop_p, res=True),
+            Conv2(3 * base, k=(7, 1), s=1, p=(3, 0), b=b, drop_p=drop_p, res=True),
             Conv2(3 * base, k=1, s=1, p=0, b=b, drop_p=drop_p, res=True)
         )
         self.compress = nn.Sequential(
-            Conv3(3 * base, k=(7, 1, 1), s=1, p=0, b=b),
+            Conv3(3 * base, k=(7, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if N == 16 else Conv3(3 * base, k=(4, 1, 1), s=1, p=0, b=b),
         )
 
     def forward(self, x, cat_in):
@@ -560,11 +568,13 @@ class revS4(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(revS4, self).__init__()
         #self.rs4a = nn.Upsample(scale_factor=2)  # wtf should i do for these
-        self.rs4b = TConv2(6 * base, k=3, s=2, p=1, op=0, b=b)
-        self.final = nn.Sequential(
-            nn.SELU(),
-            nn.Dropout2d(p=drop_p)
-        )
+        op = 0 if N == 16 else 1
+        self.rs4b = TConv2(6 * base, k=3, s=2, p=1, op=op, b=b, drop_p=drop_p)
+        self.final = nn.Identity()
+        #self.final = nn.Sequential(
+        #    nn.ReLU(),
+        #    nn.Dropout2d(p=drop_p)
+        #)
 
     def forward(self, x):
         #rs4a = self.rs4a(x)
@@ -601,12 +611,24 @@ class IRNv4_3DUNet(nn.Module):
         self.rev_s4 = revS4(base, b=bias, drop_p=drop_p)  # (B, 192, ...)
         self.rev_s3 = revS3(base, b=bias, drop_p=drop_p)  # (B, 160, ...)  CAT
         self.rev_s2 = revS2(base, b=bias, drop_p=drop_p)  # (B, 128, ...)
-        if not ROI:
-            self.rev_s1 = revS1(base, b=bias, drop_p=drop_p)  # (B, 5, ...)  CAT
-        else:
-            self.rev_s1 = revS1_ROI(base, b=bias, drop_p=drop_p)
+        self.rev_s1 = revS1(base, b=bias, drop_p=drop_p)  # (B, 5, ...)  CAT
 
-        self.final = nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias)
+        if ROI:
+            self.final = nn.Sequential(
+                nn.MaxPool2d(kernel_size=(3, 5), stride=(1, 2)),
+                Conv2(base, k=5, s=1, p=0, d=3, b=bias, drop_p=drop_p),
+                Conv2(base, k=5, s=1, p=0, d=2, b=bias, drop_p=drop_p),
+                Conv2(base, k=5, s=1, p=0, b=bias, drop_p=drop_p),
+                Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
+                Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
+                nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias),
+                #nn.Tanh()
+            )
+        else:
+            self.final = nn.Sequential(
+                nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias),
+                #nn.Tanh(),
+            )
 
         self.net_down = nn.ModuleList(
                 [self.s1, self.s2, self.s3, self.s4] + self.a_n + [self.ra] + self.b_n + [self.rb] + self.c_n
@@ -647,8 +669,8 @@ class IRNv4_3DUNet(nn.Module):
                 x = step(x)
                 printit(step, x.shape)
 
-        printit('FINAL', x.shape)
         x = self.final(x)
+        printit('FINAL', x.shape)
         return x
 
 # ---------------------------------------------------------------------------------
