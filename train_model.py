@@ -20,6 +20,7 @@ from InceptUNet3D import IRNv4_3DUNet
 from Incept3D import IRNv4_3D
 from InceptUNet import IRNv4UNet
 from v2 import UNet, MultiUNet
+from simple import Simple
 from Dummy import Dummy
 from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
@@ -87,11 +88,11 @@ def main():
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 64 # 16, 32 seem ~ same overfitting single batch
-        lin_act = 1
+        base = 32 # 16, 32 seem ~ same overfitting single batch
+        lin_act = .1
         Na, Nb, Nc = 1, 2, 1
         lr = 1e-4
-        wd = 0.01
+        wd = 0.5
         drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
@@ -103,7 +104,8 @@ def main():
 
     #model = UNet(depth=D, init_c=32, dim=3, bias=bias).to(local_rank).float()
     #model = MultiUNet(n_vars=C, depth=D, spatial_dim=2, init_c=128, embedding_dim=32, bias=bias).to(local_rank).float()
-    model = IRNv4_3DUNet(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
+    model = Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
+    #model = IRNv4_3DUNet(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
     # model = Dummy().to(local_rank).float()
 
     if FROM_LOAD:

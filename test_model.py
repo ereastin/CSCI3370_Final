@@ -17,6 +17,10 @@ import matplotlib.pyplot as plt
 import time
 import json
 from scipy.special import inv_boxcox
+import dask
+from dask import array
+from dask.diagnostics import ProgressBar
+from dask.distributed import Client, LocalCluster
 
 # custom imports
 from PrecipDataset import PrecipDataset
@@ -25,6 +29,7 @@ from Networks import *
 from InceptUNet import IRNv4UNet
 from InceptUNet3D import IRNv4_3DUNet
 from v2 import MultiUNet
+import mcs_data as mcs
 
 sys.path.append('/home/eastinev/AI')
 import utils
@@ -33,7 +38,7 @@ import paths as pth
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 BIAS = False
 CLASSIFIER = False
-
+MCS = False
 ## ================================================================================
 def main():
     parser = ArgumentParser()
@@ -64,8 +69,14 @@ def main():
     model = prep_model(model_name, model_id_tag, in_channels=6)
     model = load_model(model, model_name, model_id_tag, device)
 
-    print(f'Running test experiment {note} on {model_id_tag}')
-    check_accuracy(model, model_name, test_loader, device, exp, note=note)
+    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+    cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
+    print(cluster, flush=True)
+    with Client(cluster) as client:
+        print(client, flush=True)
+
+        print(f'Running test experiment {note} on {model_id_tag}')
+        check_accuracy(model, model_name, test_loader, device, exp, note=note)
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag, in_channels=64):
@@ -150,6 +161,15 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
         for i, (source, target, time_id) in enumerate(loader):
             print(f'Testing model on {utils.get_time_str(time_id)}...')
             source, target = source.to(device=device), target.to(device=device)
+
+            if MCS:
+                # get mask
+                mask = mcs.run(time_id)
+                # actually if gonna run perturbation here need to submit
+                # perturb_dict at each loader call to getitem... how to do that..?
+                # either have loader return Dataset --> then could compute using Dask Cluster.?!
+                # or force mask to tensor and operate directly on the 
+
             pred = model(source)
             pred, target = pred * std_p + mn_p, target * std_p + mn_p
             loss = F.mse_loss(pred, target)

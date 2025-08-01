@@ -39,10 +39,8 @@ def main():
         # NOTE: if running monthly.. each month LSF + P ~ 5G
         pd = OTPrecipDataset('train', 'inc3d_reana', season='both', weekly=True, shuffle=False)
         t1 = time.time()
-        for i, (s, t, tt) in enumerate(pd):
-            print(s.shape, t.shape)
+        for i, (_, _, tt) in enumerate(pd):
             print(tt, flush=True)
-            break
 
         t2 = time.time()
 
@@ -107,12 +105,6 @@ class OTPrecipDataset(Dataset):
                 sys.exit(21)
 
         self.ctr = 0
-        if STATS:
-            self.t_strs = np.asarray(self.t_strs)
-            smpl = int(0.25 * len(self.t_strs))
-            print(f'sampling {smpl} of {len(t_strs)} weeks')
-            rnd_idx = rng.integers(len(self.t_strs), size=smpl)
-            self.t_strs = self.t_strs[rnd_idx]
 
         # Necessary for composing filename requests
         self.dpm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -179,8 +171,6 @@ class OTPrecipDataset(Dataset):
         """
         select batch by idx
         """
-        # TODO: forecasting would be handled here when passing files.. 
-        # does open_mfdataset() work with just one item list?
         if self.weekly:
             (year, month, week) = self.t_strs[idx] 
             source_rw_pth, target_rw_pth = self._get_filepaths(year, month, week)
@@ -436,6 +426,9 @@ class OTPrecipDataset(Dataset):
     def read_source(self, in_file):
         ds = xr.open_dataset(in_file, drop_variables=RM_VARS) if self.weekly else xr.open_mfdataset(in_file)
 
+        # select for feqer p-levels
+        ds = ds.sel(lev=self.sel_p)
+
         if AGG:
             ds = ds.resample(time='6h').mean()
 
@@ -450,8 +443,6 @@ class OTPrecipDataset(Dataset):
             return
 
         if NORM:
-            # select for feqer p-levels
-            ds = ds.sel(lev=self.sel_p)
             for v in self.merra_vars:
                 if v in RM_VARS:
                     continue

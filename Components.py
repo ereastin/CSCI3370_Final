@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 EPS = 1e-5  # this is the default for BatchNorm
 
@@ -69,8 +70,6 @@ class Conv2(nn.Module):
         else:
             return self.net(x)
 
-# TODO: if wanting residual connections here need to make sure TConv is producing same shape
-# btw if it is producing same shape is it same as Conv or no.? why not use Conv then?
 # ---------------------------------------------------------------------------------
 class TConv3(nn.Module):
     def __init__(self, c_out, k=3, s=1, p=1, op=0, b=False, drop_p=0.0):
@@ -100,6 +99,22 @@ class TConv2(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+# ---------------------------------------------------------------------------------
+class Upsample2(nn.Module):
+    def __init__(self, c_out, k=3, s=1, p=1, b=False, drop_p=0.0):
+        super(Upsample2, self).__init__()
+        self.net = nn.Sequential(
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.ReLU(),
+            nn.LazyBatchNorm2d(eps=EPS),
+            nn.Dropout2d(p=drop_p)
+        )
+        
+
+    def forward(self, x, size):
+        up = F.interpolate(x, size=size, mode='nearest')
+        return self.net(up)
 
 # ---------------------------------------------------------------------------------
 class SelectionUnit2(nn.Module):
