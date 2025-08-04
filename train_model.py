@@ -30,6 +30,7 @@ from decorators import timeit
 C, D, H, W = 6, 8, 80, 144
 FROM_LOAD = False
 MIN, MAX = np.log(1.1), np.log(101)
+RET_AS_TNSR = True
 
 # =================================================================================
 def main():
@@ -88,11 +89,11 @@ def main():
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 32 # 16, 32 seem ~ same overfitting single batch
+        base = 16 # 16, 32 seem ~ same overfitting single batch
         lin_act = .1
-        Na, Nb, Nc = 1, 2, 1
+        Na, Nb, Nc = 5, 10, 5
         lr = 1e-4
-        wd = 0.5
+        wd = 0.1
         drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
@@ -121,7 +122,7 @@ def main():
     optimizer = prep_optimizer(model.parameters(), lr, wd, opt_type)
 
     # Create scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.3, patience=15, cooldown=0)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, cooldown=0)
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[250, 225, 250], gamma=0.5)
 
     # Create DataLoaders
@@ -217,6 +218,13 @@ def train(model, device, train_loader, optimizer, loss_fn):
         train_loss = 0
         model.train()
         for i, (source, target, tt) in enumerate(train_loader):
+            if not RET_AS_TNSR:
+                # compute
+                source = source.to_dataarray().to_numpy()
+                source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
+                target = target.to_dataarray().to_numpy()
+                target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
+
             source, target = source.to(device).float(), target.to(device).float()
             optimizer.zero_grad()
             out = model(source)
@@ -359,8 +367,8 @@ def prep_loaders(exp, season, rank, world_size, weekly=False, ddp=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
     prefetch = 1
     shuffle = True
-    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=False)
-    val_ds = OTPrecipDataset('val', exp, season, weekly=weekly)
+    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=True, ret_as_tnsr=RET_AS_TNSR)
+    val_ds = OTPrecipDataset('val', exp, season, weekly=weekly, ret_as_tnsr=RET_AS_TNSR)
 
     sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None
 

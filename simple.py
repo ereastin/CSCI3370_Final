@@ -7,7 +7,7 @@ from Components import *
 PRINT = False
 ROI = True
 ATTN = True
-N, D, H, W = 6, 8, 80, 144
+N, D, H, W = 6, 8, 54, 42
 # ---------------------------------------------------------------------------------
 def main():
     base = 32
@@ -24,7 +24,7 @@ def main():
     #print(calc_shape_out(35, 0, 1, 18, 1))
     #exit()
 
-    net = IRNv4_3DUNet(N, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
+    net = Simple(N, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).cuda()
     #print(net)
     test = torch.ones((1, N, D, H, W)).cuda()
     net(test)
@@ -41,9 +41,9 @@ class S1(nn.Module):
     def __init__(self, base, b=False, drop_p=0.0):
         super(S1, self).__init__()
         self.s1_b1 = nn.Sequential(
-            Conv3(base, k=(3, 1, 1), s=1, p='same', d=3, b=b, drop_p=drop_p),
-            Conv3(base, k=(1, 3, 1), s=1, p='same', d=5, b=b, drop_p=drop_p),
-            Conv3(base, k=(1, 1, 3), s=1, p='same', d=5, b=b, drop_p=drop_p),
+            Conv3(base, k=(3, 1, 1), s=1, p='same', d=1, b=b, drop_p=drop_p),
+            Conv3(base, k=(1, 3, 1), s=1, p='same', d=1, b=b, drop_p=drop_p),
+            Conv3(base, k=(1, 1, 3), s=1, p='same', d=1, b=b, drop_p=drop_p),
             Conv3(2 * base, k=3, s=1, p=0, b=b, drop_p=drop_p) if N == 16 else nn.Identity()
         )
 

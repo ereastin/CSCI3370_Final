@@ -22,11 +22,11 @@ from functools import partial
 
 STATS = False
 NORM = True
-ROI = True
+ROI = False
 FORECAST = False
 AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
-RM_VARS = [] #['U', 'V', 'T', 'QV']
 CLASSIFIER = False
+RET_AS_TNSR = True
 
 ## ================================================================================
 def main():
@@ -37,10 +37,11 @@ def main():
     with Client(cluster) as client:
         print(client, flush=True)
         # NOTE: if running monthly.. each month LSF + P ~ 5G
-        pd = OTPrecipDataset('train', 'inc3d_reana', season='both', weekly=True, shuffle=False)
+        pd = OTPrecipDataset('train', 'inc3d_reana', season='both', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
         t1 = time.time()
-        for i, (_, _, tt) in enumerate(pd):
+        for i, (s, t, tt) in enumerate(pd):
             print(tt, flush=True)
+
 
         t2 = time.time()
 
@@ -49,18 +50,18 @@ def main():
 
 ## ================================================================================
 class OTPrecipDataset(Dataset):
-    def __init__(self, mode, exp, season='both', weekly=False, shuffle=False, perturb_dict={}):
+    def __init__(self, mode, exp, season='both', weekly=False, shuffle=False, ret_as_tnsr=True):
         super(OTPrecipDataset, self).__init__()
         self.mode = mode
         self.exp = exp
         self.season = season
         self.weekly = weekly
         self.shuffle = shuffle
-        self.perturb_dict = perturb_dict
+        self.ret_as_tnsr = ret_as_tnsr
 
         if self.exp == 'inc3d_reana':
-            self.n_months = 6
-            mnth_offset = 3
+            self.n_months = 6 if season == 'both' else 3
+            mnth_offset = 6 if season == 'sum' else 3
         else:
             self.n_months = 8
             mnth_offset = 4
@@ -157,7 +158,10 @@ class OTPrecipDataset(Dataset):
         self._stats['precipitationvar'] = []
         self._stats['Np'] = []
 
-        self.stats_pth = f'./{self.exp}_agg_norm_vars.json' if AGG else f'./{self.exp}_norm_vars.json'
+        self.stats_pth = f'./{self.exp}_norm_vars_{self.season}'
+        if AGG: self.stats_pth += '_agg'
+        if ROI: self.stats_pth += '_roi'
+        self.stats_pth += '.json'
         if os.path.exists(self.stats_pth):
             with open(self.stats_pth, 'r') as f:
                 self.stats = json.load(f)
@@ -236,8 +240,8 @@ class OTPrecipDataset(Dataset):
                 return (None, None, time_id)
 
             # Trim if missing timesteps (only good for Dec 31 2020 bc of MSWEP?)
-            if source.shape[0] != target.shape[0]:
-                source, target = self.prune(source, target, time_id)
+            #if source.shape[0] != target.shape[0]:
+            #    source, target = self.prune(source, target, time_id)
 
             # Shuffle within batch
             if self.shuffle:
@@ -251,17 +255,19 @@ class OTPrecipDataset(Dataset):
     # -----------------------------------------------------------------------------
     def _get_filepaths(self, year, month, week):
         # MERRA stuff
-        source_rw_pth = os.path.join(pth.SCRATCH, self.exp, f'LSF_{year}_{str(month).zfill(2)}_{week}.nc')
+        base = os.path.join('/projects/bccg/Data/ml-for-climate/cus_precip')
+        #base = os.path.join(pth.SCRATCH, self.exp))
+        source_rw_pth = os.path.join(base, f'LSF_{year}_{str(month).zfill(2)}_{week}.nc')
 
         # MSWEP stuff
         if not FORECAST:
-            target_rw_pth = [os.path.join(pth.SCRATCH, self.exp, f'P_{year}_{str(month).zfill(2)}_{week}.nc')]
+            target_rw_pth = [os.path.join(base, f'P_{year}_{str(month).zfill(2)}_{week}.nc')]
         else:
             if week == 3:
                 paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month + 1).zfill(2)}_{0}.nc']
             else:
                 paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month).zfill(2)}_{week + 1}.nc']
-            target_rw_pth = [os.path.join(pth.SCRATCH, self.exp, p) for p in paths]
+            target_rw_pth = [os.path.join(base, p) for p in paths]
 
         return source_rw_pth, target_rw_pth
 
@@ -353,50 +359,6 @@ class OTPrecipDataset(Dataset):
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
-    @staticmethod
-    def _perturb(ds, instructions):
-        perturb_var = instructions['var']
-        perturb_type = instructions['type']
-        abl = instructions['abl']
-        scale = instructions['scale']
-        # potentially select certain regions for perturbation.?
-
-        plvls = ds.coords['lev'].values[()]
-        if abl: plvls = plvls[:6]  # not necessarily ABL really just low-level phen.
-        lats, lons = ds.coords['lat'].values[()], ds.coords['lon'].values[()]
-        match perturb_type:
-            case 'zero':
-                # set values to zero (e.g. winds, q are 'reasonable', removing convection/advection, removing moisture)
-                # or name as 'assign' and use for all e.g. subsidence everywhere?
-                ds[perturb_var].loc[dict(lev=plvls)] = 0
-            case 'scale':  # can also use to invert sign
-                ds[perturb_var].loc[dict(lev=plvls)] *= scale
-            case 'vshear':  # low-level vertical wind shear thought to be important for MCS (Rotunno '88), also LLJs for moisture?
-                # remove per-column vertical shear -> set field at each cell to mean of cell across p-lvls
-                ds[perturb_var].loc[dict(lat=lats, lon=lons)] = ds[perturb_var].mean(dim='lev')
-            case 'hshear':
-                # remove horizontal shear -> set field at each p-lvl to mean of p-lvl
-                ds[perturb_var].loc[dict(lev=plvls)] = ds[perturb_var].mean(dim=['lat', 'lon'])
-            case 'shuffle':
-                k = 8  # adjust this for different scale importance
-                for i in range(0, len(lats), k):
-                    for j in range(0, len(lons), k):
-                        for p in range(0, len(plvls)):
-                            slat, slon = slice(i, i + k), slice(j, j + k)
-                            v = ds[perturb_var].isel(lat=slat, lon=slon, lev=p).values[()].flatten()
-                            np.random.shuffle(v)
-                            ds[perturb_var].loc[dict(lat=lats[slat], lon=lons[slon], lev=plvls[p])] = v.reshape((k, k))
-
-        return ds
-
-    # -----------------------------------------------------------------------------
-    def perturb(self, ds, perturb_dict):
-        if perturb_dict == {}: return ds
-        for instr in perturb_dict.items():
-            ds = self._perturb(ds, instr)
-        return ds
-
-    # -----------------------------------------------------------------------------
     def write_source(self, out_file, source_files, drop_vars, regrid_dict, **kwargs):
         preproc_fn = partial(self._select_batch, **kwargs)
         ds = xr.open_mfdataset(
@@ -424,15 +386,15 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def read_source(self, in_file):
-        ds = xr.open_dataset(in_file, drop_variables=RM_VARS) if self.weekly else xr.open_mfdataset(in_file)
+        ds = xr.open_dataset(in_file) if self.weekly else xr.open_mfdataset(in_file)
 
-        # select for feqer p-levels
+        # select for fewer p-levels
         ds = ds.sel(lev=self.sel_p)
+        if ROI:
+            ds = ds.sel(lat=slice(24, 50.5), lon=slice(-108.75, -83.125))
 
         if AGG:
             ds = ds.resample(time='6h').mean()
-
-        self.perturb(ds, self.perturb_dict)
 
         if STATS:
             for v in self.merra_vars:
@@ -444,15 +406,14 @@ class OTPrecipDataset(Dataset):
 
         if NORM:
             for v in self.merra_vars:
-                if v in RM_VARS:
-                    continue
                 ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
-        #if ROI:
-        #    ds = ds.sel(lat=slice(24, 50.5), lon=slice(-108.75, -83.125))
 
-        data = ds.to_dataarray().to_numpy()
-        source = torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-        return source
+        if self.ret_as_tnsr:
+            data = ds.to_dataarray().to_numpy()
+            source = torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
+            return source
+        else:
+            return ds
 
     # -----------------------------------------------------------------------------
     def write_target(self, out_file, target_files, drop_vars, regrid_dict, **kwargs):
@@ -499,13 +460,17 @@ class OTPrecipDataset(Dataset):
             return
 
         if NORM and not CLASSIFIER:
-            #pass
             v = 'precipitation'
             ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
         
-        data = ds.to_dataarray().to_numpy()
-        target = torch.tensor(data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
+        if self.ret_as_tnsr:
+            data = ds.to_dataarray().to_numpy()
+            target = torch.tensor(data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
+            return target
+        else:
+            return ds
 
+        '''
         if CLASSIFIER:
             # NOTE: cleaner way to do this..?
             s = 6 if AGG else 3
@@ -516,68 +481,7 @@ class OTPrecipDataset(Dataset):
             #target = torch.where((target >= 7.5 * s) & (target < 50 * s), 3, target)  # heavy rain
             #target = torch.where(target >= 50 * s, 4, target)  # violent rain
             target = target.squeeze(1)
-
-        return target
- 
-    ## ============================================================================
-    ## UNUSED
-    ## ============================================================================
-    def _rm_var(self, ds):
-        # what about perturbing? add noise etc?
-        lev = ds.coords['lev']
-        for p in self.p:
-            fill = 0.0 if self.zero else ds[self.rm_var].sel(dict(lev=lev[lev == p])).mean()
-            ds[self.rm_var].loc[dict(lev=lev[lev == p])] = fill
-        return ds
-
-    def close_distr(self):
-        self.client.close()
-        self.cluster.close()
-
-    def source_gettr(self, time_slc=None):
-        new_ds = self.source.sel(time=time_slc)
-        data = new_ds.to_dataarray().to_numpy()
-        return torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-
-    def new_get_source(self, drop_vars, regrid_dict, **kwargs):
-        preproc_fn = partial(self._select_batch, **kwargs)
-        ds = xr.open_mfdataset(
-            os.path.join(pth.MERRA, '*.nc4'),
-            preprocess=preproc_fn,
-            drop_variables=drop_vars,
-            concat_dim='time',
-            data_vars='minimal',
-            coords='minimal',
-            combine='nested',
-            compat='override',
-            join='override',
-            parallel=True,
-            chunks='auto',
-            engine='h5netcdf'
-        )
-        ds = self._regrid(ds, regrid_dict) 
-        return ds
-
-    # NOTE: vzarr garbage is literally just as slow and can't grab region before using xr.open_dataset()..
-    def vzarr_get_source(self, fname, source_files, drop_vars):
-        virtual_datasets = [
-            open_virtual_dataset(filepath, drop_variables=drop_vars)
-            for filepath in source_files
-        ]
-
-        # this Dataset wraps a bunch of virtual ManifestArray objects directly
-        virtual_ds = xr.combine_nested(virtual_datasets, concat_dim='time', data_vars='minimal', coords='minimal', compat='override', join='override')
-
-        # cache the combined dataset pattern to disk, in this case using the existing kerchunk specification for reference files
-        virtual_ds.virtualize.to_kerchunk(os.path.join(pth.SCRATCH, f'{fname}.json'), format='json')
-
-    def vzarr_load_source(self, fname, **kwargs):
-        ds = xr.open_dataset(os.path.join(pth.SCRATCH, f'{fname}.json'), engine='kerchunk')
-        ds = ds.sel(**kwargs)
-        data = ds.to_dataarray().to_numpy()
-        return torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-    ## ============================================================================
-    ## ============================================================================
+        '''
 
 ## ================================================================================
 if __name__ == '__main__':

@@ -29,6 +29,7 @@ from Networks import *
 from InceptUNet import IRNv4UNet
 from InceptUNet3D import IRNv4_3DUNet
 from v2 import MultiUNet
+from simple import Simple
 import mcs_data as mcs
 
 sys.path.append('/home/eastinev/AI')
@@ -39,6 +40,9 @@ MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 
 BIAS = False
 CLASSIFIER = False
 MCS = False
+RET_AS_TNSR = True
+C, D, H, W = 6, 8, 80, 144
+
 ## ================================================================================
 def main():
     parser = ArgumentParser()
@@ -53,8 +57,6 @@ def main():
     tag = args.tag
     model_id_tag = season + tag
 
-    perturb_dict = {}
-
     note = model_id_tag + '_ctrl'  # TODO: adjust this based on perturbation experiments
     #note += 'trn'
 
@@ -65,21 +67,20 @@ def main():
         print('Using CPU')
 
     weekly = True
-    test_loader = prep_loader(exp, season, weekly, perturb_dict)
-    model = prep_model(model_name, model_id_tag, in_channels=6)
+    test_loader = prep_loader(exp, season, weekly)
+    model = prep_model(model_name, model_id_tag)
     model = load_model(model, model_name, model_id_tag, device)
 
-    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-    cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
-    print(cluster, flush=True)
-    with Client(cluster) as client:
-        print(client, flush=True)
-
-        print(f'Running test experiment {note} on {model_id_tag}')
-        check_accuracy(model, model_name, test_loader, device, exp, note=note)
+    #n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+    #cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
+    #print(cluster, flush=True)
+    #with Client(cluster) as client:
+    #    print(client, flush=True)
+    print(f'Running test experiment {note} on {model_id_tag}')
+    check_accuracy(model, model_name, test_loader, device, exp, note=note)
 
 # ---------------------------------------------------------------------------------
-def prep_model(model_name, tag, in_channels=64):
+def prep_model(model_name, tag):
     # TODO: just pass this to the model and have it load from there
     path = os.path.join(f'./models/{model_name}/hyperparams_{tag}.json')
     with open(path, 'r') as f:
@@ -94,19 +95,20 @@ def prep_model(model_name, tag, in_channels=64):
     # create specified model
     match model_name:
         case 'inc':
-            return IRNv4UNet(in_channels)
+            return IRNv4UNet(C)
         case 'inc3d':
-            return IRNv4_3DUNet(in_channels, depth=16, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+            return Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
+            #return IRNv4_3DUNet(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act)
         case 'unet':
-            return MultiUNet(n_vars=5, depth=16, init_c=64, embedding_dim=32, bias=True)
+            return MultiUNet(n_vars=C, depth=D, init_c=64, embedding_dim=32, bias=True)
         case _:
             print(f'Model "{model_name}" not valid')
             sys.exit(-21)
 
 # ---------------------------------------------------------------------------------
-def prep_loader(exp, season, weekly, perturb_dict):
+def prep_loader(exp, season, weekly):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
-    test_ds = OTPrecipDataset('test', exp, season, weekly, False, perturb_dict)
+    test_ds = OTPrecipDataset('test', exp, season, weekly, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, pin_memory=False)
 
     return test_loader
@@ -160,16 +162,29 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
     with torch.no_grad():
         for i, (source, target, time_id) in enumerate(loader):
             print(f'Testing model on {utils.get_time_str(time_id)}...')
-            source, target = source.to(device=device), target.to(device=device)
 
             if MCS:
-                # get mask
-                mask = mcs.run(time_id)
-                # actually if gonna run perturbation here need to submit
-                # perturb_dict at each loader call to getitem... how to do that..?
-                # either have loader return Dataset --> then could compute using Dask Cluster.?!
-                # or force mask to tensor and operate directly on the 
+                # get mask and valid times
+                mask, times = mcs.run(time_id)
+                # mask = np.logical_not(mask)  # if want inverted for non-MCS region
+                source, target = source.sel(time=times), target.sel(time=times)
+                # construct unique perturbation from MCS DB
+                # levels available --> self.sel_p = np.array([1000, 975, 925, 850, 750, 550, 450, 250])
+                perturb_dict = {0: {'var': 'OMEGA', 'type': 'scale', 'scale': 0, 'region': mask, 'levels': None}}
+            else:
+                perturb_dict = {}
 
+            # do input perturbation
+            #source = utils.perturb(source, perturb_dict)
+
+            # compute
+            #source = source.to_dataarray().to_numpy()
+            #source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
+            #target = target.to_dataarray().to_numpy()
+            #target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
+
+            # send to device and predict
+            source, target = source.to(device=device), target.to(device=device)
             pred = model(source)
             pred, target = pred * std_p + mn_p, target * std_p + mn_p
             loss = F.mse_loss(pred, target)

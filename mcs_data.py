@@ -10,7 +10,7 @@ import json
 import os
 import sys
 sys.path.append('/home/eastinev/AI')
-
+import utils  # TODO: test the perturbations make sure they work correctly
 import paths as pth
 
 KEEP_PIX = [
@@ -44,9 +44,13 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        year = 2004
-        time_id = {'mn': 4, 'wk_days': np.arange(1, 9)}
-        run(year, time_id)
+        source = xr.open_dataset(os.path.join(pth.SCRATCH, 'inc3d_reana', 'LSF_2004_04_0.nc'))
+        VAR = 'U'
+        time_id = {'yr': 2004, 'mn': 4, 'wk_days': np.arange(1, 9)}
+        mask, times = run(time_id)  # this is a DataArray btw
+        source = source.sel(time=times)
+        perturb_dict = {0: {'var': 'U', 'type': 'hshear', 'scale': 100, 'region': mask, 'levels': np.array([1000, 875, 850])}}
+        source = utils.perturb(source, perturb_dict)
 
 # ---------------------------------------------------------------------
 def run(time_id):
@@ -66,15 +70,16 @@ def run(time_id):
     times = np.unique(times)
     pix_data = read_pixel_data(year, times)
     # track_nums = np.unique(pix_data['cloudtracknumber'].values[()])  # make sure to exclude nan
+    # TODO: what happens when no MCS in week? possible?
     mask = _regrid(pix_data['cloudtracknumber'], {'do': True})
     # select specific masks? use all?
     # mask = pix_data['cloudtracknumber'] == track_idx[i] + 1
-    return mask
+    return mask, times
 
 # ---------------------------------------------------------------------
 def _regrid(ds, regrid_dict):
     if not regrid_dict['do']: return ds
-    ds_grid = xr.open_dataset('./pgrid.nc')
+    ds_grid = xr.open_dataset('./vgrid.nc')
     ds = ds.regrid.nearest(ds_grid)
     return ds
 
