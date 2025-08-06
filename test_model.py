@@ -40,7 +40,7 @@ MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 
 BIAS = False
 CLASSIFIER = False
 MCS = False
-RET_AS_TNSR = True
+RET_AS_TNSR = False
 C, D, H, W = 6, 8, 80, 144
 
 ## ================================================================================
@@ -71,13 +71,13 @@ def main():
     model = prep_model(model_name, model_id_tag)
     model = load_model(model, model_name, model_id_tag, device)
 
-    #n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-    #cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
-    #print(cluster, flush=True)
-    #with Client(cluster) as client:
-    #    print(client, flush=True)
-    print(f'Running test experiment {note} on {model_id_tag}')
-    check_accuracy(model, model_name, test_loader, device, exp, note=note)
+    n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
+    cluster = LocalCluster(n_workers=n_cpus)  # have to specify this think it defaults to 4 or smthn
+    print(cluster, flush=True)
+    with Client(cluster) as client:
+        print(client, flush=True)
+        print(f'Running test experiment {note} on {model_id_tag}')
+        check_accuracy(model, model_name, test_loader, device, exp, season, note=note)
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag):
@@ -107,7 +107,7 @@ def prep_model(model_name, tag):
 
 # ---------------------------------------------------------------------------------
 def prep_loader(exp, season, weekly):
-    n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
+    n_workers = int(os.environ['SLURM_CPUS_PER_TASK']) if RET_AS_TNSR else 0
     test_ds = OTPrecipDataset('test', exp, season, weekly, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
     test_loader = DataLoader(test_ds, batch_size=None, shuffle=False, num_workers=n_workers, pin_memory=False)
 
@@ -121,7 +121,7 @@ def load_model(model, model_name, tag, device):
     return model
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device, exp, note=''):
+def check_accuracy(model, model_name, loader, device, exp, season, note=''):
     gridshape = (54, 42)  # (H, W)
     accum_dict = {
         'DJF': [torch.zeros(gridshape)] * 3 + [0],
@@ -141,22 +141,25 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
     # extent = (-108, -84.25, 24, 47.75)
 
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
-    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'vis_precip'}
+    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'pprecip'}
 
     # select specific (or random) days
-    selected = [(1984, 6, 13), (1983, 6, 15), (1982, 4, 20), (2007, 3, 11), (1989, 7, 11)]  #, (1987, 6, 13)] overfit test
+    # summer mcs
+    selected = [(2004, 6, 14), (2010, 7, 11), (2015, 7, 27), (2015, 7, 13)]
+    # spring mcs
+    #selected = [(2010, 5, 9), (2016, 4, 10), (2016, 3, 27)]
     # selected = [(np.random.choice(np.arange(1980, 2021)), np.random.choice(np.arange(4, 12)), np.random.choice(np.arange(1, 31))) for _ in range(4)]  # select 4 random days
     # Known Sumatra Squall events (not in test apparently)
     # selected = [(2016, 7, 12), (2014, 6, 11), (2014, 6, 12)]
     spd = 8
 
     # For un-standardizing predicted/target precip data
-    with open(f'./{exp}_norm_vars.json', 'r') as f:
+    with open(f'./{exp}_norm_vars_{season}_mcs.json', 'r') as f:
         stats = json.load(f)
     mn_p = stats['precipitationmn']
     std_p = stats['precipitationstd']
 
-    test_loss = 0
+    losses, Ns = [], []
     model = model.to(device)
     model.eval()
     with torch.no_grad():
@@ -167,28 +170,32 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
                 # get mask and valid times
                 mask, times = mcs.run(time_id)
                 # mask = np.logical_not(mask)  # if want inverted for non-MCS region
-                source, target = source.sel(time=times), target.sel(time=times)
+                # below already taken care of during training
+                # source, target = source.sel(time=times), target.sel(time=times)
                 # construct unique perturbation from MCS DB
                 # levels available --> self.sel_p = np.array([1000, 975, 925, 850, 750, 550, 450, 250])
+                # perturb_dict = {}
                 perturb_dict = {0: {'var': 'OMEGA', 'type': 'scale', 'scale': 0, 'region': mask, 'levels': None}}
             else:
                 perturb_dict = {}
+                #perturb_dict = {0: {'var': 'T', 'type': 'scale', 'scale': 0.99, 'region': None, 'levels': None}}
 
             # do input perturbation
-            #source = utils.perturb(source, perturb_dict)
+            source = utils.perturb(source, perturb_dict)
 
             # compute
-            #source = source.to_dataarray().to_numpy()
-            #source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-            #target = target.to_dataarray().to_numpy()
-            #target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
+            source = source.to_dataarray().to_numpy()
+            source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
+            target = target.to_dataarray().to_numpy()
+            target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
 
             # send to device and predict
             source, target = source.to(device=device), target.to(device=device)
             pred = model(source)
             pred, target = pred * std_p + mn_p, target * std_p + mn_p
             loss = F.mse_loss(pred, target)
-            test_loss += loss.item()
+            losses.append(loss.item())
+            Ns.append(source.shape[0])
 
             if BIAS:
                 season = utils.get_season_str(time_id)
@@ -201,6 +208,7 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
                 accum_dict[season][3] += n_days
 
             # do precip prediction plotting
+            # TODO: fix this to grab correct days when selecting just for MCS days
             day_sel = utils.match_time_str(time_id, selected)
             for d in day_sel:
                 time_sel = utils.get_time_str(time_id, day_sel)
@@ -209,8 +217,8 @@ def check_accuracy(model, model_name, loader, device, exp, note=''):
                 target_sel = target[d * spd:(d + 1) * spd]
                 utils.plot_precip(pred_sel, target_sel, time_sel, plot_params, model_name, note=note)
 
-    test_loss /= len(loader)
-    print(f'Mean MSE loss on test set: {test_loss}')
+    test_loss = np.sum(np.array(Ns) * np.array(losses)) / np.sum(np.array(Ns))
+    print(f'Per-item mean MSE loss on test set: {test_loss}')
     if BIAS:
         # per-cell average daily values
         mean_daily_bias = {k: v[2] / v[3] for k, v in accum_dict.items() if v[3] != 0}

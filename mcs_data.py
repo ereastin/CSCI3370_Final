@@ -47,13 +47,14 @@ def main():
         source = xr.open_dataset(os.path.join(pth.SCRATCH, 'inc3d_reana', 'LSF_2004_04_0.nc'))
         VAR = 'U'
         time_id = {'yr': 2004, 'mn': 4, 'wk_days': np.arange(1, 9)}
-        mask, times = run(time_id)  # this is a DataArray btw
+        times = run(time_id)  # this is a DataArray btw
+        mask = get_mask(times, time_id)
         source = source.sel(time=times)
         perturb_dict = {0: {'var': 'U', 'type': 'hshear', 'scale': 100, 'region': mask, 'levels': np.array([1000, 875, 850])}}
         source = utils.perturb(source, perturb_dict)
 
 # ---------------------------------------------------------------------
-def run(time_id):
+def get_times(time_id):
     year = time_id['yr']
     good_tracks, track_idx = read_stats(year, time_id)
     # NOTE: track_idx are offset by -1 relative to mask value
@@ -68,12 +69,22 @@ def run(time_id):
 
     # TODO: if wanting stats for something need to compile in loop above and pass along
     times = np.unique(times)
+    if len(times) == 0:
+        return []
+    return times
+
+# ---------------------------------------------------------------------
+def get_mask(times, time_id):
+    year = time_id['yr']
     pix_data = read_pixel_data(year, times)
-    # track_nums = np.unique(pix_data['cloudtracknumber'].values[()])  # make sure to exclude nan
-    # TODO: what happens when no MCS in week? possible?
     mask = _regrid(pix_data['cloudtracknumber'], {'do': True})
-    # select specific masks? use all?
-    # mask = pix_data['cloudtracknumber'] == track_idx[i] + 1
+
+    return mask
+
+# ---------------------------------------------------------------------
+def run(time_id):
+    times = get_times(time_id)
+    mask = get_mask(times, time_id)
     return mask, times
 
 # ---------------------------------------------------------------------
@@ -131,8 +142,8 @@ def read_stats(year, time_id=None):
         -> 2018-2021 warm season (Apr-Sep, eg 20180401.0000-20190901.0000)
     **For full suite of available MCS statistics see README
     """
-    mn1, mn2 = get_months(year)
-    path = os.path.join(pth.MCS_STATS, f'mcs_tracks_final_extc_{year}{mn1}01.0000_{year+1}{mn2}01.0000.nc')
+    mn1, mn2, yr2 = get_months(year)
+    path = os.path.join(pth.MCS_STATS, f'mcs_tracks_final_extc_{year}{mn1}01.0000_{yr2}{mn2}01.0000.nc')
 
     with open('stats_vars.json', 'r') as f:
         stats_vars = json.load(f)['vars']
@@ -148,7 +159,7 @@ def read_stats(year, time_id=None):
         time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-03-01')) & (ds['end_basetime'] <= np.datetime64(f'{year}-08-30'))
     else:
         mn = str(time_id['mn']).zfill(2)
-        d0, d1 = str(time_id['wk_days'][0]).zfill(2), str(time_id['wk_days'][-1]).zfill(2)
+        d0, d1 = str(time_id['days'][0]).zfill(2), str(time_id['days'][-1]).zfill(2)
         time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-{mn}-{d0}T00:00')) & (ds['end_basetime'] <= np.datetime64(f'{year}-{mn}-{d1}T21:00'))
 
     select = complete_idx & time_idx
@@ -167,6 +178,7 @@ def get_track_stats(track):
     eval_time = np.array([t if pd.Timestamp(t).hour in list(range(0, 22, 3)) else np.datetime64('nat') for t in track['base_time'].values[()]])
     eval_mask = eval_time == track['base_time'].values[()]
 
+    '''
     # before sampling only MSWEP times agg total rain
     # also have convective and stratiform rain if that is useful
     total_rain = track['total_rain'].values[()] # need to agg from previous timesteps
@@ -174,32 +186,21 @@ def get_track_stats(track):
         if val:
             agg = total_rain[i-2:i+1]
             track['total_rain'].loc[dict(times=i)] = np.sum(agg)
+    '''
 
     # sample only MSWEP times
     track = track.isel(times=eval_mask)
-
-    # any other interesting /valuable ones?
-    #stages = track['lifecycle_stage'].values[()]
-    # cn = track['cloudnumber'].values[()]  # i guess this changes across lifecycle.?
-    # use for defining local vs. LS perturbations
-    # TODO: easiest way to define would be get mask from pixel level data no?
-    #mean_lat = track['meanlat'].values[()]
-    #mean_lon = track['meanlon'].values[()]
-    #ccs_area = track['ccs_area'].values[()]
-    #core_area = track['core_area'].values[()]
-    # NOTE: if not all three steps included at start then output is 0
-    #total_rain = track['total_rain'].values[()] # aggregated from previous timesteps, no cos(lat) weighting
 
     return track
 
 # ---------------------------------------------------------------------
 def get_months(year):
     if year >= 2018:
-        mn1, mn2 = 4, 9
+        mn1, mn2, yr2 = 4, 9, year
     else:
-        mn1, mn2 = 1, 1
+        mn1, mn2, yr2 = 1, 1, year + 1
     mn1, mn2 = str(mn1).zfill(2), str(mn2).zfill(2)
-    return mn1, mn2
+    return mn1, mn2, yr2
 
 # =====================================================================
 if __name__ == '__main__':

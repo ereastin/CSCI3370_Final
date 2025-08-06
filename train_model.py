@@ -21,13 +21,14 @@ from Incept3D import IRNv4_3D
 from InceptUNet import IRNv4UNet
 from v2 import UNet, MultiUNet
 from simple import Simple
+from simple2d import Simple2
 from Dummy import Dummy
 from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
 from decorators import timeit
 
 # for Lazy module dry-runs.. handle this better for other input shapes
-C, D, H, W = 6, 8, 80, 144
+C, D, H, W = 6, 16, 80, 144
 FROM_LOAD = False
 MIN, MAX = np.log(1.1), np.log(101)
 RET_AS_TNSR = True
@@ -89,11 +90,11 @@ def main():
             'optim': opt_type, 'lr': lr, 'max_lr': max_lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
     else:
-        base = 16 # 16, 32 seem ~ same overfitting single batch
-        lin_act = .1
+        base = 36
+        lin_act = 1
         Na, Nb, Nc = 5, 10, 5
-        lr = 1e-4
-        wd = 0.1
+        lr = 1e-3
+        wd = 0.15
         drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
@@ -106,6 +107,7 @@ def main():
     #model = UNet(depth=D, init_c=32, dim=3, bias=bias).to(local_rank).float()
     #model = MultiUNet(n_vars=C, depth=D, spatial_dim=2, init_c=128, embedding_dim=32, bias=bias).to(local_rank).float()
     model = Simple(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
+    #model = Simple2(C * D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
     #model = IRNv4_3DUNet(C, depth=D, Na=Na, Nb=Nb, Nc=Nc, base=base, bias=bias, drop_p=drop_p, lin_act=lin_act).to(local_rank).float()
     # model = Dummy().to(local_rank).float()
 
@@ -123,7 +125,7 @@ def main():
 
     # Create scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, cooldown=0)
-    #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[250, 225, 250], gamma=0.5)
+    #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250, 350], gamma=0.5)
 
     # Create DataLoaders
     train_loader, val_loader, sampler = prep_loaders(exp, season, rank, world_size, weekly=weekly, ddp=ddp)
@@ -148,22 +150,26 @@ def main():
             if ddp: sampler.set_epoch(epoch)  # necessary for DataLoaders w/DDP to correctly shuffle
 
             # Train epoch
-            l = train(model, local_rank, train_loader, optimizer, loss_fn)
+            #l = train(model, local_rank, train_loader, optimizer, loss_fn)
+            l, n = train(model, local_rank, train_loader, optimizer, loss_fn)
 
             # Collect training loss and validate
             if ddp:
                 dist.barrier()
                 all_loss = [torch.zeros_like(l, device=torch.device('cpu')) for _ in range(world_size)]
+                all_n = [torch.zeros_like(n, device=torch.device('cpu')) for _ in range(world_size)]
                 dist.all_gather(all_loss, l, group=cpu_grp)
+                dist.all_gather(all_n, n, group=cpu_grp)
                 val_loss = torch.tensor([0.0], device=torch.device('cpu'))
                 if rank == 0:
-                    train_loss = torch.sum(torch.tensor(all_loss)) / train_loader_len
+                    #train_loss = torch.sum(torch.tensor(all_loss)) / train_loader_len
+                    train_loss = torch.sum(torch.tensor(all_loss)) / torch.sum(torch.tensor(all_n))
                     if train_loss is torch.nan: raise ValueError  # TODO: this doesn't actually work?
                     val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
                 dist.barrier()
                 dist.broadcast(val_loss, src=0, group=cpu_grp)
             else:
-                train_loss = l / train_loader_len
+                train_loss = l / n
                 if train_loss is torch.nan: raise ValueError
                 val_loss = validate(model, local_rank, val_loader, loss_fn, ddp=ddp)
                 #val_loss = 0
@@ -175,7 +181,6 @@ def main():
             if tmp_lr != curr_lr:
                 print(f'Learning rate update on plateau at epoch {epoch}: {curr_lr} -> {tmp_lr}', flush=True)
                 curr_lr = tmp_lr
-
 
             # Checkpoint model
             if ddp: dist.barrier()  # make sure all training in epoch is done before saving
@@ -201,6 +206,7 @@ def main():
         if rank == 0:
             t2 = time.time()
             print(f'Run completed in {t2 - t1}', flush=True)
+        #helper._save_point(model, epoch)
 
     except ValueError as e:
         print(f'[ERROR]: Loss is nan @ epoch {epoch} with message {e}, exiting...')
@@ -216,6 +222,7 @@ def main():
 def train(model, device, train_loader, optimizer, loss_fn):
     try:
         train_loss = 0
+        losses, Ns = [], []
         model.train()
         for i, (source, target, tt) in enumerate(train_loader):
             if not RET_AS_TNSR:
@@ -229,10 +236,13 @@ def train(model, device, train_loader, optimizer, loss_fn):
             optimizer.zero_grad()
             out = model(source)
             loss = loss_fn(out, target)
-            train_loss += loss.item()
+            #train_loss += loss.item()
+            losses.append(loss.item())
+            Ns.append(source.shape[0])
             loss.backward()
             optimizer.step()
-        return torch.tensor(train_loss)
+        return torch.sum(torch.tensor(losses) * torch.tensor(Ns)), torch.sum(torch.tensor(Ns)) 
+        #return torch.tensor(train_loss)
     except Exception as e:
         print(f'[ERROR]: Training on {device} @ {time.time()} -- {e}', flush=True)
         raise e
@@ -241,7 +251,7 @@ def train(model, device, train_loader, optimizer, loss_fn):
 # ---------------------------------------------------------------------------------
 def validate(model, device, val_loader, loss_fn, ddp=False):
     try:
-        val_loss = 0
+        losses, Ns = [], []
         model.eval()
         val_model = model if not ddp else model.module
         with torch.no_grad():
@@ -249,9 +259,10 @@ def validate(model, device, val_loader, loss_fn, ddp=False):
                 source, target = source.to(device).float(), target.to(device).float()
                 out = val_model(source)
                 loss = loss_fn(out, target)
-                val_loss += loss.item()
+                losses.append(loss.item())
+                Ns.append(source.shape[0])
 
-        val_loss /= len(val_loader.dataset)
+        val_loss = np.sum(np.array(Ns) * np.array(losses)) / np.sum(np.array(Ns))
         return torch.tensor(val_loss)
     except Exception as e:
         print(f'[ERROR]: Validating on {device} @ {time.time()} -- {e}', flush=True)
@@ -367,7 +378,7 @@ def prep_loaders(exp, season, rank, world_size, weekly=False, ddp=False):
     n_workers = int(os.environ['SLURM_CPUS_PER_TASK'])
     prefetch = 1
     shuffle = True
-    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=True, ret_as_tnsr=RET_AS_TNSR)
+    train_ds = OTPrecipDataset('train', exp, season, weekly=weekly, shuffle=shuffle, ret_as_tnsr=RET_AS_TNSR)
     val_ds = OTPrecipDataset('val', exp, season, weekly=weekly, ret_as_tnsr=RET_AS_TNSR)
 
     sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank) if ddp else None

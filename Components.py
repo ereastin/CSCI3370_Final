@@ -6,24 +6,26 @@ EPS = 1e-5  # this is the default for BatchNorm
 
 # ---------------------------------------------------------------------------------
 class Attn(nn.Module):
-    def __init__(self, c_int, c_out, depth, b=False):
+    def __init__(self, c_int, c_out, depth, b=False, twod=False):
         super(Attn, self).__init__()
-        self.squeeze = nn.Sequential(
-            Conv3(c_int, k=(depth, 1, 1), s=1, p=0, b=b),
-            nn.LazyBatchNorm3d(eps=EPS)
-        )
+        if twod:
+            self.squeeze = nn.Sequential(
+                Conv2(c_int, k=1, s=1, p=0, b=b),
+            )
+        else:
+            self.squeeze = nn.Sequential(
+                Conv3(c_int, k=(depth, 1, 1), s=1, p=0, b=b),
+            )
+
         self.layer_sig = nn.Sequential(
             Conv2(c_int, k=1, s=1, p=0, b=b), 
-            nn.LazyBatchNorm2d(eps=EPS)
         )
         self.gate_sig = nn.Sequential(
             Conv2(c_int, k=1, s=1, p=0, b=b),
-            nn.LazyBatchNorm2d(eps=EPS)
         )
         self.relu = nn.ReLU()
         self.psi = nn.Sequential(
             Conv2(1, k=1, s=1, p=0, b=b),
-            nn.LazyBatchNorm2d(eps=EPS),
             nn.Sigmoid()
         )
 
@@ -42,7 +44,7 @@ class Conv3(nn.Module):
         self.net = nn.Sequential(
             nn.LazyConv3d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
             nn.ReLU(),
-            nn.LazyBatchNorm3d(eps=EPS),
+            #nn.NORM?3d(eps=EPS, track_running_stats=False),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -60,7 +62,7 @@ class Conv2(nn.Module):
         self.net = nn.Sequential(
             nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
             nn.ReLU(),
-            nn.LazyBatchNorm2d(eps=EPS),
+            #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
         )
 
@@ -78,7 +80,7 @@ class TConv3(nn.Module):
         self.net = nn.Sequential(
             nn.LazyConvTranspose3d(c_out, kernel_size=k, stride=s, padding=p, output_padding=op, bias=b),
             nn.ReLU(),
-            nn.LazyBatchNorm3d(eps=EPS),
+            #nn.NORM?3d(eps=EPS, track_running_stats=False),
             nn.Dropout3d(p=drop_p)
         )
 
@@ -92,7 +94,7 @@ class TConv2(nn.Module):
         self.net = nn.Sequential(
             nn.LazyConvTranspose2d(c_out, kernel_size=k, stride=s, padding=p, output_padding=op, bias=b),
             nn.ReLU(),
-            nn.LazyBatchNorm2d(eps=EPS),
+            #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
         )
         
@@ -107,7 +109,12 @@ class Upsample2(nn.Module):
         self.net = nn.Sequential(
             nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
             nn.ReLU(),
-            nn.LazyBatchNorm2d(eps=EPS),
+            # addition of below to correct upsampling artifacts?
+            #nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            #nn.ReLU(),
+            #nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            #nn.ReLU(),
+            #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
         )
         

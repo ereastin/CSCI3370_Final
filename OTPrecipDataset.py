@@ -18,7 +18,8 @@ import time
 from scipy.stats import boxcox
 import json
 from itertools import product
-from functools import partial
+import mcs_data as mcs
+import file_utils as futils
 
 STATS = False
 NORM = True
@@ -27,6 +28,7 @@ FORECAST = False
 AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
 CLASSIFIER = False
 RET_AS_TNSR = True
+TWOD = False
 
 ## ================================================================================
 def main():
@@ -37,11 +39,10 @@ def main():
     with Client(cluster) as client:
         print(client, flush=True)
         # NOTE: if running monthly.. each month LSF + P ~ 5G
-        pd = OTPrecipDataset('train', 'inc3d_reana', season='both', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
+        pd = OTPrecipDataset('train', 'inc3d_reana', season='sum', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
-            print(tt, flush=True)
-
+            print(tt)
 
         t2 = time.time()
 
@@ -66,12 +67,17 @@ class OTPrecipDataset(Dataset):
             self.n_months = 8
             mnth_offset = 4
 
-        yrs = list(range(1980, 2021))
+        yrs = list(range(2004, 2021)) #list(range(1980, 2021))
         mnths = list(range(mnth_offset, mnth_offset + self.n_months))
         wks = list(range(4))
 
         if self.weekly:
             t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
+            # remove weeks without a single MCS
+            rm = [(2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
+            for t in rm:
+                if t in t_strs:
+                    t_strs.pop(t_strs.index(t))
         else:  # monthly
             t_strs = [(l[0], l[1]) for l in list(product(yrs, mnths))]
 
@@ -93,28 +99,18 @@ class OTPrecipDataset(Dataset):
                 #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[:tr]
             case 'val':
+                #self.t_strs = t_strs[1:2]
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
                 #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[tr + v:]
-            case 'prep':
-                self.t_strs = t_strs
             case 'check':
                 self.t_strs = t_strs
             case _:
                 print('Mode {mode} is not correct')
                 sys.exit(21)
 
-        self.ctr = 0
-
-        # Necessary for composing filename requests
-        self.dpm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        self.splits = {  # super ugly..
-            31: [np.arange(1, 9), np.arange(9, 17), np.arange(17, 25), np.arange(25, 32)],
-            30: [np.arange(1, 9), np.arange(9, 17), np.arange(17, 24), np.arange(24, 31)],
-            29: [np.arange(1, 9), np.arange(9, 16), np.arange(16, 23), np.arange(23, 30)],
-            28: [np.arange(1, 8), np.arange(8, 15), np.arange(15, 22), np.arange(22, 29)],
-        }
+        self.ctr = 0  # ??
 
         # MERRA selection criteria
         self.merra_regrid = {'do': False, 'extent': None, 'steps': None}
@@ -161,6 +157,7 @@ class OTPrecipDataset(Dataset):
         self.stats_pth = f'./{self.exp}_norm_vars_{self.season}'
         if AGG: self.stats_pth += '_agg'
         if ROI: self.stats_pth += '_roi'
+        self.stats_pth += '_mcs'
         self.stats_pth += '.json'
         if os.path.exists(self.stats_pth):
             with open(self.stats_pth, 'r') as f:
@@ -177,99 +174,49 @@ class OTPrecipDataset(Dataset):
         """
         if self.weekly:
             (year, month, week) = self.t_strs[idx] 
-            source_rw_pth, target_rw_pth = self._get_filepaths(year, month, week)
+            source_rw_pth, target_rw_pth = futils._get_filepaths(year, month, week, self.exp, forecast=FORECAST)
         else:
             (year, month), week = self.t_strs[idx], None
             fname = f'{year}_{str(month).zfill(2)}_*.nc'  # this will not work for writing..
 
-        wk_days, _ = self._get_wk_days(year, month, week)
+        wk_days, _ = futils._get_wk_days(year, month, week)
         time_id = {'yr': year, 'mn': month, 'days': wk_days}
+        # NEW filter for MCSs only
+        t_slc = mcs.get_times(time_id) # should never be empty list
 
-        if self.mode == 'prep':
-            curr_files = os.listdir(os.path.join(pth.SCRATCH, self.exp))
-            os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-            merra_files, mswep_files = self._get_files_by_time(year, month, week)
-            # write source
-            try:
-                if not source_rw_pth.split(os.sep)[-1] in curr_files:
-                    self.write_source(
-                        source_rw_pth,
-                        merra_files,
-                        self.merra_drop_vars,
-                        self.merra_regrid,
-                        lat=self.merra_lats,
-                        lon=self.merra_lons,
-                        lev=self.p
-                    )
-            except Exception as e:
-                print(f'MERRA {source_rw_pth} failed', e)
+        # NOTE: shoudn't need try-catch here..
+        try:
+            source = self.read_source(
+                source_rw_pth,
+                t_slc
+            )
+        except FileNotFoundError as e:
+            print(f'MERRA {source_rw_pth} failed, DNE', e)
+            source = None
+        try:
+            target = self.read_target(
+                target_rw_pth,
+                t_slc
+            )
+        except FileNotFoundError as e:
+            print(f'MSWEP {target_rw_pth} failed, DNE', e)
+            target = None
 
-            # write target
-            try:
-                if not target_rw_pth.split(os.sep)[-1] in curr_files:
-                    self.write_target(
-                        target_rw_pth,
-                        mswep_files,
-                        self.mswep_drop_vars,
-                        self.mswep_regrid,
-                        lat=self.mswep_lats,
-                        lon=self.mswep_lons
-                        # TODO: add lev selection here too for target agnostic work
-                    )
-            except Exception as e:
-                print(f'MSWEP {target_rw_pth} failed', e)
+        if source is None or target is None:
             return (None, None, time_id)
 
-        else:
-            try:
-                source = self.read_source(
-                    source_rw_pth
-                )
-            except FileNotFoundError as e:
-                print(f'MERRA {source_rw_pth} failed, DNE', e)
-                source = None
-            try:
-                target = self.read_target(
-                    target_rw_pth
-                )
-            except FileNotFoundError as e:
-                print(f'MSWEP {target_rw_pth} failed, DNE', e)
-                target = None
+        # Trim if missing timesteps (only good for Dec 31 2020 bc of MSWEP?)
+        #if source.shape[0] != target.shape[0]:
+        #    source, target = self.prune(source, target, time_id)
 
-            if source is None or target is None:
-                return (None, None, time_id)
+        # Shuffle within batch
+        if self.shuffle:
+            shuff_idx = torch.randperm(source.shape[0])
+            source = source[shuff_idx]
+            target = target[shuff_idx]
 
-            # Trim if missing timesteps (only good for Dec 31 2020 bc of MSWEP?)
-            #if source.shape[0] != target.shape[0]:
-            #    source, target = self.prune(source, target, time_id)
-
-            # Shuffle within batch
-            if self.shuffle:
-                shuff_idx = torch.randperm(source.shape[0])
-                source = source[shuff_idx]
-                target = target[shuff_idx]
-
-            sample = (source, target, time_id)
-            return sample
-
-    # -----------------------------------------------------------------------------
-    def _get_filepaths(self, year, month, week):
-        # MERRA stuff
-        base = os.path.join('/projects/bccg/Data/ml-for-climate/cus_precip')
-        #base = os.path.join(pth.SCRATCH, self.exp))
-        source_rw_pth = os.path.join(base, f'LSF_{year}_{str(month).zfill(2)}_{week}.nc')
-
-        # MSWEP stuff
-        if not FORECAST:
-            target_rw_pth = [os.path.join(base, f'P_{year}_{str(month).zfill(2)}_{week}.nc')]
-        else:
-            if week == 3:
-                paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month + 1).zfill(2)}_{0}.nc']
-            else:
-                paths = [f'P_{year}_{str(month).zfill(2)}_{week}.nc', f'P_{year}_{str(month).zfill(2)}_{week + 1}.nc']
-            target_rw_pth = [os.path.join(base, p) for p in paths]
-
-        return source_rw_pth, target_rw_pth
+        sample = (source, target, time_id)
+        return sample
 
     # -----------------------------------------------------------------------------
     @staticmethod
@@ -286,56 +233,7 @@ class OTPrecipDataset(Dataset):
         ds_grid = xr.open_dataset('./pgrid.nc')
         ds = ds.regrid.conservative(ds_grid)
         return ds
-
-    # -----------------------------------------------------------------------------
-    @staticmethod
-    def _select_batch(ds, **kwargs):
-        return ds.sel(**kwargs)
-    
-    # TODO: move to utils
-    # -----------------------------------------------------------------------------
-    @staticmethod
-    def _get_merra_nsel(year, month):
-        # N is 1-4 (?) 1 for 1980-1991, 2 for 1992-2000, 3 for 2001-2010, 4 for 2011+ 
-        if year in list(range(1980, 1992)):
-            N = 100
-        elif year in list(range(1992, 2001)):
-            N = 200
-        elif year in list(range(2001, 2011)):
-            N = 300
-        elif year == 2020 and month == 9:
-            N = 401
-        else:
-            N = 400
-        return N
-
-    # TODO: move to utils ??
-    # -----------------------------------------------------------------------------
-    def _get_wk_days(self, year, month, week=None):
-        leap_year = (year % 4 == 0)
-        n_days = self.dpm[month - 1]
-        n_days += 1 if leap_year and month == 2 else 0
-        wk_days = n_days if week == None else self.splits[n_days][week]
-        return wk_days, leap_year
-
-    # TODO: move to utils ??
-    # -----------------------------------------------------------------------------
-    def _get_files_by_time(self, year, month, week):
-        wk_days, leap_year = self._get_wk_days(year, month, week)
-
-        # MERRA fname: <>.YYYYMMDD.nc4
-        N = self._get_merra_nsel(year, month)
-        merra_base = f'MERRA2_{N}.inst3_3d_asm_Np.' + str(year) + str(month).zfill(2)
-        merra_fs = [os.path.join(pth.MERRA,  merra_base + str(day).zfill(2) + '.nc4') for day in wk_days]
-
-        # MSWEP fname: YYYYDDD.HH.nc
-        d0 = 1 if leap_year and month > 2 else 0
-        day_sum = sum(self.dpm[:month - 1])
-        doys = [os.path.join(pth.MSWEP, str(year) + str(day_sum + day).zfill(3)) for day in wk_days + d0]
-        hrs = ['.' + str(hr).zfill(2) + '.nc' for hr in range(0, 24, 3)]
-        mswep_fs = [f[0] + f[1] for f in list(product(doys, hrs))]
-        return merra_fs, mswep_fs
-
+ 
     # -----------------------------------------------------------------------------
     def get_stats(self):
         print('writing var stats...')
@@ -359,37 +257,11 @@ class OTPrecipDataset(Dataset):
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
-    def write_source(self, out_file, source_files, drop_vars, regrid_dict, **kwargs):
-        preproc_fn = partial(self._select_batch, **kwargs)
-        ds = xr.open_mfdataset(
-            source_files,
-            preprocess=preproc_fn,
-            drop_variables=drop_vars,
-            concat_dim='time',
-            data_vars='minimal',
-            coords='minimal',
-            combine='nested',
-            compat='override',
-            join='override',
-            parallel=True,
-            chunks='auto',
-            engine='h5netcdf'
-        )
-        # do nan interp
-        ds0 = ds[['U', 'V', 'OMEGA', 'QV']].fillna(value=0)
-        # NOTE: not sure this is the best way to handle but other options? interpolate below ground?
-        dsBF = ds[['T', 'H']].bfill(dim='lev')
-        ds = xr.merge([ds0, dsBF])
-        ds = self._regrid(ds, regrid_dict)
-        ds = ds.compute()
-        ds.to_netcdf(out_file, engine='netcdf4')
-
-    # -----------------------------------------------------------------------------
-    def read_source(self, in_file):
+    def read_source(self, in_file, t_slc):
         ds = xr.open_dataset(in_file) if self.weekly else xr.open_mfdataset(in_file)
 
-        # select for fewer p-levels
-        ds = ds.sel(lev=self.sel_p)
+        # select for fewer p-levels and MCS times
+        ds = ds.sel(time=t_slc)
         if ROI:
             ds = ds.sel(lat=slice(24, 50.5), lon=slice(-108.75, -83.125))
 
@@ -410,35 +282,20 @@ class OTPrecipDataset(Dataset):
 
         if self.ret_as_tnsr:
             data = ds.to_dataarray().to_numpy()
-            source = torch.tensor(data).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
+            source = torch.tensor(data)
+            if TWOD:
+                s = source.shape
+                source = source.reshape(s[1], -1, s[3], s[4]) # return as (time, var, (lev), lat, lon) 
+            else:
+                source = source.permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
             return source
         else:
             return ds
 
     # -----------------------------------------------------------------------------
-    def write_target(self, out_file, target_files, drop_vars, regrid_dict, **kwargs):
-        preproc_fn = partial(self._select_batch, **kwargs)
-        ds = xr.open_mfdataset(
-            target_files,
-            preprocess=preproc_fn,
-            drop_variables=drop_vars,
-            concat_dim='time',
-            data_vars='minimal',
-            coords='minimal',
-            combine='nested',
-            compat='override',
-            join='override',
-            parallel=True,
-            chunks='auto',
-            engine='h5netcdf'
-        )
-        ds = self._regrid(ds, regrid_dict)
-        ds = ds.compute()
-        ds.to_netcdf(out_file, engine='netcdf4')
-
-    # -----------------------------------------------------------------------------
-    def read_target(self, in_file):
+    def read_target(self, in_file, t_slc):
         ds = xr.open_mfdataset(in_file)
+        ds = ds.sel(time=t_slc)
 
         if FORECAST:
             # this should work right -> just forecasting next timestep..
