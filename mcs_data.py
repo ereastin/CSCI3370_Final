@@ -37,6 +37,12 @@ KEEP_STATS = [
     # 'cloudnumber',
     'total_rain'
 ]
+
+TOP = 50.5
+BOT = 24
+RT = -83.125
+LFT = -108.75
+
 # =====================================================================
 def main():
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
@@ -44,14 +50,13 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        source = xr.open_dataset(os.path.join(pth.SCRATCH, 'inc3d_reana', 'LSF_2004_04_0.nc'))
-        VAR = 'U'
-        time_id = {'yr': 2004, 'mn': 4, 'wk_days': np.arange(1, 9)}
-        times = run(time_id)  # this is a DataArray btw
-        mask = get_mask(times, time_id)
-        source = source.sel(time=times)
-        perturb_dict = {0: {'var': 'U', 'type': 'hshear', 'scale': 100, 'region': mask, 'levels': np.array([1000, 875, 850])}}
-        source = utils.perturb(source, perturb_dict)
+        #source = xr.open_dataset(os.path.join(pth.SCRATCH, 'inc3d_reana', 'LSF_2004_04_0.nc'))
+        #VAR = 'U'
+        time_id = {'yr': 2004, 'mn': 4, 'days': np.arange(1, 9)}
+        mask, times = run(time_id)  # this is a DataArray btw
+        #source = source.sel(time=times)
+        #perturb_dict = {0: {'var': 'U', 'type': 'hshear', 'scale': 100, 'region': mask, 'levels': np.array([1000, 875, 850])}}
+        #source = utils.perturb(source, perturb_dict)
 
 # ---------------------------------------------------------------------
 def get_times(time_id):
@@ -77,6 +82,8 @@ def get_times(time_id):
 def get_mask(times, time_id):
     year = time_id['yr']
     pix_data = read_pixel_data(year, times)
+    print(pix_data)
+    return
     mask = _regrid(pix_data['cloudtracknumber'], {'do': True})
 
     return mask
@@ -103,8 +110,8 @@ def read_pixel_data(year, times):
         ** For full suite of available MCS statistics see README
     """
 
-    mn1, mn2 = get_months(year)
-    data_dir = f'{year}{mn1}01.0000_{year+1}{mn2}01.0000'
+    mn1, mn2, yr2 = get_months(year)
+    data_dir = f'{year}{mn1}01.0000_{yr2}{mn2}01.0000'
     times = [pd.Timestamp(t) for t in times]
     fnames = [f'mcstrack_{year}{str(t.month).zfill(2)}{str(t.day).zfill(2)}_{str(t.hour).zfill(2)}0000.nc' for t in times]
     data_paths = [os.path.join(pth.MCS_DATA, data_dir, f) for f in fnames]
@@ -176,7 +183,7 @@ def get_track_stats(track):
     track = track.isel(times=~mask)  # select data-containing timesteps for all tracks
 
     eval_time = np.array([t if pd.Timestamp(t).hour in list(range(0, 22, 3)) else np.datetime64('nat') for t in track['base_time'].values[()]])
-    eval_mask = eval_time == track['base_time'].values[()]
+    time_mask = eval_time == track['base_time'].values[()]
 
     '''
     # before sampling only MSWEP times agg total rain
@@ -188,8 +195,13 @@ def get_track_stats(track):
             track['total_rain'].loc[dict(times=i)] = np.sum(agg)
     '''
 
-    # sample only MSWEP times
-    track = track.isel(times=eval_mask)
+    #lat, lon = track['meanlat'].values[()], track['meanlon'].values[()] 
+    #good_lat = np.where((lat <= TOP) & (lat >= BOT), True, False)
+    #good_lon = np.where((lon <= RT) & (lon >= LFT), True, False)
+    # sample only MSWEP times AND in model region 'view'
+    #region_mask = good_lat & good_lon
+    #eval_mask = region_mask & time_mask
+    track = track.isel(times=time_mask)
 
     return track
 

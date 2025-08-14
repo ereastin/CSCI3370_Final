@@ -110,10 +110,10 @@ class Upsample2(nn.Module):
             nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
             nn.ReLU(),
             # addition of below to correct upsampling artifacts?
-            #nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
-            #nn.ReLU(),
-            #nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
-            #nn.ReLU(),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.ReLU(),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.ReLU(),
             #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
         )

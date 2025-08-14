@@ -141,13 +141,15 @@ def check_accuracy(model, model_name, loader, device, exp, season, note=''):
     # extent = (-108, -84.25, 24, 47.75)
 
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
-    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'pprecip'}
+    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'vis_precip'}
 
     # select specific (or random) days
+    # spr and sum
+    #selected = [(2017, 8, 4), (2008, 5, 12), (2007, 4, 18), (2015, 7, 26)]
     # summer mcs
-    selected = [(2004, 6, 14), (2010, 7, 11), (2015, 7, 27), (2015, 7, 13)]
+    #selected = [(2004, 6, 9), (2010, 7, 11), (2015, 7, 27), (2015, 7, 9)]
     # spring mcs
-    #selected = [(2010, 5, 9), (2016, 4, 10), (2016, 3, 27)]
+    selected = [(2004, 3, 17), (2010, 5, 18), (2016, 4, 10), (2006, 4, 1)]
     # selected = [(np.random.choice(np.arange(1980, 2021)), np.random.choice(np.arange(4, 12)), np.random.choice(np.arange(1, 31))) for _ in range(4)]  # select 4 random days
     # Known Sumatra Squall events (not in test apparently)
     # selected = [(2016, 7, 12), (2014, 6, 11), (2014, 6, 12)]
@@ -159,7 +161,7 @@ def check_accuracy(model, model_name, loader, device, exp, season, note=''):
     mn_p = stats['precipitationmn']
     std_p = stats['precipitationstd']
 
-    losses, Ns = [], []
+    losses, Ns, pccs = [], [], []
     model = model.to(device)
     model.eval()
     with torch.no_grad():
@@ -196,8 +198,14 @@ def check_accuracy(model, model_name, loader, device, exp, season, note=''):
             loss = F.mse_loss(pred, target)
             losses.append(loss.item())
             Ns.append(source.shape[0])
+            pccs.append(utils.cum_pcc(pred, target))
+            check = torch.where(pccs[-1] >= 0.7, True, False)
+            if torch.any(check):
+                print(time_id)
 
             if BIAS:
+                # TODO: split into diurnal cycle.? some plot of bias over time steps?
+                # or plot average daily regional rainfall over diuranl cycle for each season, target vs. pred?
                 season = utils.get_season_str(time_id)
                 pred_batch_accum, n_days = utils.calc_batch_accum(pred, steps_per_day=spd)
                 target_batch_accum, _ = utils.calc_batch_accum(target, steps_per_day=spd)
@@ -218,7 +226,13 @@ def check_accuracy(model, model_name, loader, device, exp, season, note=''):
                 utils.plot_precip(pred_sel, target_sel, time_sel, plot_params, model_name, note=note)
 
     test_loss = np.sum(np.array(Ns) * np.array(losses)) / np.sum(np.array(Ns))
-    print(f'Per-item mean MSE loss on test set: {test_loss}')
+    all_pccs = torch.cat(pccs, dim=0).numpy(force=True).flatten()
+    good_pccs = np.sum(np.where(all_pccs >= 0.7, 1, 0))
+    test_pcc = np.mean(all_pccs)
+    print(f'Per-item mean MSE: {test_loss}')
+    print(f'Per-item mean centered PCC: {test_pcc}')
+    print(f'Number of items with PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 100:.2f}%')
+
     if BIAS:
         # per-cell average daily values
         mean_daily_bias = {k: v[2] / v[3] for k, v in accum_dict.items() if v[3] != 0}

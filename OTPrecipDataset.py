@@ -5,7 +5,6 @@ from dask import array
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
 import xarray as xr
-import xarray_regrid
 #from virtualizarr import open_virtual_dataset
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,13 +19,13 @@ import json
 from itertools import product
 import mcs_data as mcs
 import file_utils as futils
+from functools import partial
 
 STATS = False
 NORM = True
 ROI = False
 FORECAST = False
 AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
-CLASSIFIER = False
 RET_AS_TNSR = True
 TWOD = False
 
@@ -67,21 +66,21 @@ class OTPrecipDataset(Dataset):
             self.n_months = 8
             mnth_offset = 4
 
-        yrs = list(range(2004, 2021)) #list(range(1980, 2021))
+        yrs = list(range(2004, 2021))  # list(range(1980, 2021))
         mnths = list(range(mnth_offset, mnth_offset + self.n_months))
         wks = list(range(4))
 
         if self.weekly:
             t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
             # remove weeks without a single MCS
-            rm = [(2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
+            rm = [(2014, 3, 2), (2004, 4, 1), (2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
             for t in rm:
                 if t in t_strs:
                     t_strs.pop(t_strs.index(t))
         else:  # monthly
             t_strs = [(l[0], l[1]) for l in list(product(yrs, mnths))]
 
-        # fix the seed, at least one shuffle is the same everytime AFAIK..
+        # fix the seed
         if self.mode != 'prep':
             rng = np.random.default_rng(seed=4207765)
             rng.shuffle(t_strs)
@@ -93,16 +92,12 @@ class OTPrecipDataset(Dataset):
             v += 1
             te += 1
 
-        # NOTE: these may not add to len(t_strs) but should cover dataset bc te not used
         match mode:
             case 'train':
-                #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[:tr]
             case 'val':
-                #self.t_strs = t_strs[1:2]
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
-                #self.t_strs = t_strs[:1]
                 self.t_strs = t_strs[tr + v:]
             case 'check':
                 self.t_strs = t_strs
@@ -110,42 +105,17 @@ class OTPrecipDataset(Dataset):
                 print('Mode {mode} is not correct')
                 sys.exit(21)
 
-        self.ctr = 0  # ??
-
-        # MERRA selection criteria
-        self.merra_regrid = {'do': False, 'extent': None, 'steps': None}
-        # CUS
-        self.merra_lats = slice(14, 53.5)
-        self.merra_lons = slice(-140, -50.625)
-        # sumatra squall
-        #self.merra_lats = slice(-15.5, 24)
-        #self.merra_lons = slice(55, 144.625)
-        self.merra_drop_vars = ['EPV', 'SLP', 'PS', 'RH', 'PHIS', 'O3', 'QI', 'QL'] # NOTE: can use RH instead of Q..
-        self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
-        #self.p = np.array([
+        #LEV = np.array([
         #    1000, 975, 950, 925, 900, 875, 850,
-        #    825, 800, 775, 750, 725, 700, 650,
-        #    600, 550, 500, 450, 400, 350, 300,
-        #    250, 200, 150, 100, 70, 50, 40,
-        #    30, 20, 10, 7, 5, 4, 3
+        #    825, 775, 700, 600, 550, 450, 400, 350, 300,
+        #    250, 200, 150, 100, 70, 
+        #    50, 40, 30, 20, 10, 7, 3
         #])
-        # from zhang repr... try just using these 8/similar.? maybe just too many features
-        self.sel_p = np.array([1000, 975, 925, 850, 750, 550, 450, 250])
         self.p = np.array([
             1000, 975, 950, 925, 900, 875, 850,
             800, 750, 650, 550, 450, 350, 250, 150, 100
         ])
 
-        # MSWEP selection criteria
-        self.mswep_regrid = {'do': True, 'extent': (24, 50.5, -108.75, -83.125), 'steps': (0.5, 0.625)}
-        buff = 1
-        self.mswep_lats = slice(50.5 + buff, 24 - buff)
-        self.mswep_lons = slice(-108.75 - buff, -83.125 + buff)
-        # sumatra squall
-        #self.mswep_regrid = {'do': False, 'extent': None, 'steps': None}
-        #self.mswep_lats = slice(8.0, 0.0)
-        #self.mswep_lons = slice(92.8, 107.2)
-        self.mswep_drop_vars = []
 
         ## For variables statistics/data norm
         self._stats = {k + 'mn': [] for k in self.merra_vars} | {k + 'var': [] for k in self.merra_vars}
@@ -169,45 +139,55 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def __getitem__(self, idx):
-        """
-        select batch by idx
-        """
         if self.weekly:
             (year, month, week) = self.t_strs[idx] 
             source_rw_pth, target_rw_pth = futils._get_filepaths(year, month, week, self.exp, forecast=FORECAST)
         else:
             (year, month), week = self.t_strs[idx], None
-            fname = f'{year}_{str(month).zfill(2)}_*.nc'  # this will not work for writing..
+            fname = f'{year}_{str(month).zfill(2)}_*.nc'
 
         wk_days, _ = futils._get_wk_days(year, month, week)
         time_id = {'yr': year, 'mn': month, 'days': wk_days}
+
         # NEW filter for MCSs only
-        t_slc = mcs.get_times(time_id) # should never be empty list
+        t_slc = mcs.get_times(time_id)
+        #t_slc = slice(None, None)
 
-        # NOTE: shoudn't need try-catch here..
-        try:
-            source = self.read_source(
-                source_rw_pth,
-                t_slc
-            )
-        except FileNotFoundError as e:
-            print(f'MERRA {source_rw_pth} failed, DNE', e)
-            source = None
-        try:
-            target = self.read_target(
-                target_rw_pth,
-                t_slc
-            )
-        except FileNotFoundError as e:
-            print(f'MSWEP {target_rw_pth} failed, DNE', e)
-            target = None
+        source = self.read_source(
+            source_rw_pth,
+            t_slc
+            #self.merra_drop_vars,
+            #time=t_slc,
+            #lev=self.p,
+        )
+        target = self.read_target(
+            target_rw_pth,
+            t_slc
+            #self.mswep_drop_vars,
+            #time=t_slc
+        )
 
-        if source is None or target is None:
-            return (None, None, time_id)
+        if self.ret_as_tnsr:
+            source, target = self._ret_tensor(source, target)
+        
+        sample = (source, target, time_id)
+        return sample
 
-        # Trim if missing timesteps (only good for Dec 31 2020 bc of MSWEP?)
-        #if source.shape[0] != target.shape[0]:
-        #    source, target = self.prune(source, target, time_id)
+    # -----------------------------------------------------------------------------
+    def _ret_tensor(self, source_ds, target_ds):
+        # TODO: sure permute is ok? dont need to make sure ordering is correct? what if inverted or something?
+        source = torch.tensor(source_ds.to_dataarray().to_numpy())
+        source_ds.close()
+        if TWOD:
+            s = source.shape
+            source = source.reshape(s[1], -1, s[3], s[4])
+            source = source.permute(1, 0, 2, 3)  # return as (time, var * lev, lat, lon)
+        else:
+            source = source.permute(1, 0, 2, 3, 4)  # return as (time, var, lev, lat, lon)
+
+        target = torch.tensor(target_ds.to_dataarray().to_numpy())
+        target_ds.close()
+        target = target.permute(1, 0, 2, 3)  # return as (time, 1[precip], lat, lon)
 
         # Shuffle within batch
         if self.shuffle:
@@ -215,8 +195,7 @@ class OTPrecipDataset(Dataset):
             source = source[shuff_idx]
             target = target[shuff_idx]
 
-        sample = (source, target, time_id)
-        return sample
+        return source, target
 
     # -----------------------------------------------------------------------------
     @staticmethod
@@ -225,14 +204,6 @@ class OTPrecipDataset(Dataset):
         print(f'pruning {f_id}...')
         trim = min(source.shape[0], target.shape[0])
         return source[:trim], target[:trim]
-
-    # -----------------------------------------------------------------------------
-    @staticmethod
-    def _regrid(ds, regrid_dict):
-        if not regrid_dict['do']: return ds
-        ds_grid = xr.open_dataset('./pgrid.nc')
-        ds = ds.regrid.conservative(ds_grid)
-        return ds
  
     # -----------------------------------------------------------------------------
     def get_stats(self):
@@ -257,13 +228,27 @@ class OTPrecipDataset(Dataset):
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
-    def read_source(self, in_file, t_slc):
-        ds = xr.open_dataset(in_file) if self.weekly else xr.open_mfdataset(in_file)
-
-        # select for fewer p-levels and MCS times
+    def read_source(self, in_file, t_slc): #drop_vars, **kwargs):
+        #preproc_fn = partial(futils._select_batch, **kwargs)
+        ds = xr.open_mfdataset(
+            in_file
+        )
+        '''
+            ,
+            preprocess=preproc_fn,
+            drop_variables=drop_vars,
+            concat_dim='time',
+            data_vars='minimal',
+            coords='minimal',
+            combine='nested',
+            compat='override',
+            join='override',
+            parallel=True,
+            chunks='auto',
+            engine='h5netcdf'
+        )
+        '''
         ds = ds.sel(time=t_slc)
-        if ROI:
-            ds = ds.sel(lat=slice(24, 50.5), lon=slice(-108.75, -83.125))
 
         if AGG:
             ds = ds.resample(time='6h').mean()
@@ -280,33 +265,38 @@ class OTPrecipDataset(Dataset):
             for v in self.merra_vars:
                 ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
 
-        if self.ret_as_tnsr:
-            data = ds.to_dataarray().to_numpy()
-            source = torch.tensor(data)
-            if TWOD:
-                s = source.shape
-                source = source.reshape(s[1], -1, s[3], s[4]) # return as (time, var, (lev), lat, lon) 
-            else:
-                source = source.permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-            return source
-        else:
-            return ds
+        return ds
 
     # -----------------------------------------------------------------------------
-    def read_target(self, in_file, t_slc):
-        ds = xr.open_mfdataset(in_file)
+    def read_target(self, in_file, t_slc): #drop_vars, **kwargs):
+        #preproc_fn = partial(futils._select_batch, **kwargs)
+        ds = xr.open_mfdataset(
+            in_file
+        )
+        '''
+            ,
+            preprocess=preproc_fn,
+            drop_variables=drop_vars,
+            concat_dim='time',
+            data_vars='minimal',
+            coords='minimal',
+            combine='nested',
+            compat='override',
+            join='override',
+            parallel=True,
+            chunks='auto',
+            engine='h5netcdf'
+        )
+        '''
         ds = ds.sel(time=t_slc)
 
         if FORECAST:
-            # this should work right -> just forecasting next timestep..
+            # TODO: fix this to accept MCS time stuff
             # what if want farther out? cant feed LSF autoregressively so would just be a 'jump'
             ds = ds.isel(time=slice(1, 64 + 1))
 
         if AGG:
             ds = ds.resample(time='6h').sum()
-
-        if ROI:
-            pass # add this back in
  
         if STATS:
             v = 'precipitation'
@@ -316,29 +306,11 @@ class OTPrecipDataset(Dataset):
             self._stats['Np'].append(dav.count().data)
             return
 
-        if NORM and not CLASSIFIER:
+        if NORM:
             v = 'precipitation'
             ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
         
-        if self.ret_as_tnsr:
-            data = ds.to_dataarray().to_numpy()
-            target = torch.tensor(data).permute(1, 0, 2, 3)  # return as (time, 1, lat, lon)
-            return target
-        else:
-            return ds
-
-        '''
-        if CLASSIFIER:
-            # NOTE: cleaner way to do this..?
-            s = 6 if AGG else 3
-            target = torch.where(target > 3, 1, 0)
-            #target = torch.where(target == 0, 0, target)
-            #target = torch.where((target > 0) & (target < 2.5 * s), 1, target)  # light rain
-            #target = torch.where((target >= 2.5 * s) & (target < 7.5 * s), 2, target)  # moderate rain
-            #target = torch.where((target >= 7.5 * s) & (target < 50 * s), 3, target)  # heavy rain
-            #target = torch.where(target >= 50 * s, 4, target)  # violent rain
-            target = target.squeeze(1)
-        '''
+        return ds
 
 ## ================================================================================
 if __name__ == '__main__':

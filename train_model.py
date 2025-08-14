@@ -26,6 +26,7 @@ from Dummy import Dummy
 from PrecipDataset import PrecipDataset
 from OTPrecipDataset import OTPrecipDataset
 from decorators import timeit
+from perceptual import SqueezeNet
 
 # for Lazy module dry-runs.. handle this better for other input shapes
 C, D, H, W = 6, 16, 80, 144
@@ -91,16 +92,17 @@ def main():
         }
     else:
         base = 36
-        lin_act = 1
+        lin_act = .1
         Na, Nb, Nc = 5, 10, 5
-        lr = 1e-3
-        wd = 0.15
+        lr = 1e-4
+        wd = 0
         drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
-        loss_fn = mse
+        loss_fn = SqueezeNet().to(local_rank).float()
+        #loss_fn = comp_loss_fn
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': loss_fn.__name__,
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'snet',
             'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
@@ -124,7 +126,7 @@ def main():
     optimizer = prep_optimizer(model.parameters(), lr, wd, opt_type)
 
     # Create scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=10, cooldown=0)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5, cooldown=0)
     #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[200, 250, 350], gamma=0.5)
 
     # Create DataLoaders
@@ -278,7 +280,8 @@ def mse(pred, target):
     return loss
 
 def wt_mse(pred, target):
-    return F.mse_loss(pred, target)
+    wt = torch.abs(target)
+    return F.mse_loss(pred, target, weight=wt)
 
 def mae(pred, target):
     return F.l1_loss(pred, target)
@@ -301,11 +304,12 @@ def pcc(pred, target):
     return 1 - pcc_loss
 
 def fft(pred, target):
-    #t = torch.exp(target) - 1
-    #p = torch.exp(pred) - 1
-    fft_pred = torch.abs(torch.fft.fft2(pred, norm='ortho'))# - torch.mean(p, dim=(2, 3), keepdim=True), norm='ortho'))
-    fft_target = torch.abs(torch.fft.fft2(target, norm='ortho'))# - torch.mean(t, dim=(2, 3), keepdim=True), norm='ortho'))
-    fft_loss = F.mse_loss(fft_pred, fft_target)
+    p = pred - torch.mean(pred, dim=(2, 3), keepdim=True)
+    t = target - torch.mean(target, dim=(2, 3), keepdim=True)
+    fft_pred = torch.abs(torch.fft.fft2(p, norm='ortho'))# - torch.mean(p, dim=(2, 3), keepdim=True), norm='ortho'))
+    fft_target = torch.abs(torch.fft.fft2(t, norm='ortho'))# - torch.mean(t, dim=(2, 3), keepdim=True), norm='ortho'))
+    fft_wt = torch.log(1 + F.l1_loss(fft_pred, fft_target, reduction='none'))
+    fft_loss = F.l1_loss(fft_pred, fft_target, weight=fft_wt)
     return fft_loss
 
 def cross_entropy(pred, target):
@@ -321,15 +325,10 @@ def dice(pred, target):
     return 1 - (2 * (a * b).sum() + 1e-5) / (a.sum() + b.sum() + 1e-5)
     
 def comp_loss_fn(pred, target):
-    #mae_loss = mae(pred, target)
     mse_loss = mse(pred, target)
-    diff_loss = torch.abs(target.sum() - pred.sum())
-    #huber_loss = huber(pred, target)
-    #wt_mse_loss = wt_mse(pred, target)
-    #neg = torch.mean(F.relu(-1 * (torch.exp(pred) - 1)))
-    #fft_loss = fft(pred, target)
-    #pcc_loss = pcc(pred, target)
-    return mse_loss + 0.01 * diff_loss
+    fft_loss = fft(pred, target)
+    #return mse_loss + 0.25 * fft_loss
+    return mse_loss + 0.35 * fft_loss
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag, in_channels=64):
