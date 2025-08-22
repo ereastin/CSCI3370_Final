@@ -1,7 +1,5 @@
 import os
 import sys
-sys.path.append('/home/eastinev/AI')
-import paths as pth
 import numpy as np
 from functools import partial
 from itertools import product
@@ -13,6 +11,10 @@ import dask
 from dask import array
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
+
+sys.path.append('/home/eastinev/AI')
+import paths as pth
+import utils
 
 ## ================================================================================
 # Necessary for composing filename requests
@@ -110,7 +112,7 @@ def main():
     t_strs = get_time_strs()
 
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-    cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
+    cluster = LocalCluster(n_workers=n_cpus)
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
@@ -119,8 +121,15 @@ def main():
         for t in t_strs:
             times = make_str(t)
             yr, mn, wk = t[0], t[1], t[2]
-            source_files, target_files = _get_files_by_time(yr, mn, wk)
+            curr_files = os.listdir(os.path.join(pth.SCRATCH, EXP))
+            os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
             source_write_path, target_write_path = _get_filepaths(yr, mn, wk, EXP)
+            if source_write_path.split(os.sep)[-1] in curr_files:
+                continue
+            else:
+                print(f'writing {source_write_path}')
+
+            source_files, target_files = _get_files_by_time(yr, mn, wk)
 
             '''
             ds = xr.open_mfdataset(source_files)
@@ -155,19 +164,14 @@ def main():
                 target_write_path[0],
                 target_files,
                 [],
-                {'do': True, 'target_grid': './pgrid.nc'},
+                {
+                    'do': True,
+                    'target_grid': '~/AI/incept/pgrid.nc',
+                    'regrid_type': 'conservative'
+                },
                 lat=CUS_LAT,
                 lon=CUS_LON
             )
-
-
-# -----------------------------------------------------------------------------
-def _regrid(ds, regrid_dict):
-    if not regrid_dict['do']: return ds
-    ds_grid = xr.open_dataset(regrid_dict['target_grid'])
-    # can move this to utils if can select regrid type by dict
-    ds = ds.regrid.conservative(ds_grid)
-    return ds
 
 # -----------------------------------------------------------------------------
 def make_str(time_id):
@@ -182,9 +186,9 @@ def get_time_strs():
     if WEEKLY:
         t_strs = [(l[0], l[1], l[2]) for l in list(product(YEARS, MONTHS, WEEKS))]
         # remove weeks without a single MCS
-        for t in RM_WEEKS:
-            if t in t_strs:
-                t_strs.pop(t_strs.index(t))
+        #for t in RM_WEEKS:
+        #    if t in t_strs:
+        #        t_strs.pop(t_strs.index(t))
     else:  # monthly
         t_strs = [(l[0], l[1]) for l in list(product(YEARS, MONTHS))]
 
@@ -263,42 +267,6 @@ def _select_batch(ds, **kwargs):
     return ds.sel(**kwargs)
 
 # -----------------------------------------------------------------------------
-def write_files(exp):
-    curr_files = os.listdir(os.path.join(pth.SCRATCH, exp))
-    os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
-    merra_files, mswep_files = self._get_files_by_time(year, month, week)
-    # write source
-    try:
-        if not source_rw_pth.split(os.sep)[-1] in curr_files:
-            self.write_source(
-                source_rw_pth,
-                merra_files,
-                self.merra_drop_vars,
-                self.merra_regrid,
-                lat=self.merra_lats,
-                lon=self.merra_lons,
-                lev=self.p
-            )
-    except Exception as e:
-        print(f'MERRA {source_rw_pth} failed', e)
-
-    # write target
-    try:
-        if not target_rw_pth.split(os.sep)[-1] in curr_files:
-            self.write_target(
-                target_rw_pth,
-                mswep_files,
-                self.mswep_drop_vars,
-                self.mswep_regrid,
-                lat=self.mswep_lats,
-                lon=self.mswep_lons
-                # TODO: add lev selection here too for target agnostic work
-            )
-    except Exception as e:
-        print(f'MSWEP {target_rw_pth} failed', e)
-    return (None, None, time_id)
-
-# -----------------------------------------------------------------------------
 def write_target(out_file, target_files, drop_vars, regrid_dict, **kwargs):
     preproc_fn = partial(_select_batch, **kwargs)
     ds = xr.open_mfdataset(
@@ -315,7 +283,7 @@ def write_target(out_file, target_files, drop_vars, regrid_dict, **kwargs):
         chunks='auto',
         engine='h5netcdf'
     )
-    ds = _regrid(ds, regrid_dict)
+    ds = utils.regrid(ds, regrid_dict)
     ds = ds.compute()
     ds.to_netcdf(out_file, engine='netcdf4')
 
@@ -341,7 +309,7 @@ def write_source(out_file, source_files, drop_vars, regrid_dict, **kwargs):
     # NOTE: not sure this is the best way to handle but other options? interpolate below ground?
     dsBF = ds[['T', 'H']].bfill(dim='lev')
     ds = xr.merge([ds0, dsBF])
-    ds = _regrid(ds, regrid_dict)
+    ds = utils.regrid(ds, regrid_dict)
     ds = ds.compute()
     ds.to_netcdf(out_file, engine='netcdf4')
 

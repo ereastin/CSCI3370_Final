@@ -21,6 +21,9 @@ import dask
 from dask import array
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
+import pandas as pd
+#import warnings
+#warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # custom imports
 from PrecipDataset import PrecipDataset
@@ -37,9 +40,16 @@ import utils
 import paths as pth
 
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-BIAS = False
-CLASSIFIER = False
-MCS = False
+MERRA_VARS = ['QV', 'U', 'V', 'OMEGA', 'H', 'T']
+LEV = np.array([
+    1000, 975, 950, 925, 900, 875, 850,
+    825, 775, 700, 600, 550, 450, 400, 350, 300,
+    250, 200, 150, 100, 70, 
+    50, 40, 30, 20, 10, 7, 3
+])
+BIAS = True
+PRECIP = False
+MCS = True
 RET_AS_TNSR = False
 C, D, H, W = 6, 8, 80, 144
 
@@ -50,15 +60,14 @@ def main():
     parser.add_argument('-e', '--exp', type=str)
     parser.add_argument('-sn', '--season', type=str)
     parser.add_argument('-t', '--tag', type=str, default='')
+    parser.add_argument('-v', '--var', type=str, default='')
     args = parser.parse_args()
 
     model_name = args.model_name
     exp, season = args.exp, args.season
     tag = args.tag
+    test_var = args.var
     model_id_tag = season + tag
-
-    note = model_id_tag + '_ctrl'  # TODO: adjust this based on perturbation experiments
-    #note += 'trn'
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -72,12 +81,72 @@ def main():
     model = load_model(model, model_name, model_id_tag, device)
 
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
-    cluster = LocalCluster(n_workers=n_cpus)  # have to specify this think it defaults to 4 or smthn
+    cluster = LocalCluster(n_workers=n_cpus)
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        print(f'Running test experiment {note} on {model_id_tag}')
-        check_accuracy(model, model_name, test_loader, device, exp, season, note=note)
+        '''
+        Song 2019:
+        Here, we use the zonal and meridional winds at three levels (925, 500, and 200 hPa)
+        and the specific humidity at two levels (925 and 500 hPa)
+        (and geopotential at these levels)
+
+        Feng 2019:
+        large-scale 925-hPa wind and specific humidity, and 500-hPa geopotential height
+        '''
+        perturb_dict = {
+            0: {
+                'var': 'QV',
+                'type': 'scale',
+                'scale': 0,
+                'invert': False,
+                'levels': None,
+            },
+        }
+        check_accuracy(
+            model,
+            model_name,
+            test_loader,
+            device,
+            exp,
+            season,
+            note=model_id_tag,
+            perturb_dict=perturb_dict,
+        ) 
+
+def shuffle(test_var):
+    df_list = []
+    try:
+        for v in [test_var]:
+            for l in LEV:
+                perturb_dict = {
+                    0: {
+                        'var': v,
+                        'type': 'shuffle',
+                        'scale': 1,
+                        'invert': False,
+                        'levels': l,
+                    }
+                }
+                df_list = check_accuracy(
+                    model,
+                    model_name,
+                    test_loader,
+                    device,
+                    exp,
+                    season,
+                    note=model_id_tag,
+                    perturb_dict=perturb_dict,
+                    df_list=df_list
+                )
+
+            out_df = pd.concat(df_list)
+            print(out_df)
+            out_df.to_csv(f'./{exp}_{season}_{v}_shuffle_add.csv')
+    except KeyboardInterrupt:
+        out_df = pd.concat(df_list)
+        print(out_df)
+        out_df.to_csv(f'./{exp}_{season}_{v}_shuffle_add.csv')
 
 # ---------------------------------------------------------------------------------
 def prep_model(model_name, tag):
@@ -121,36 +190,34 @@ def load_model(model, model_name, tag, device):
     return model
 
 # ---------------------------------------------------------------------------------
-def check_accuracy(model, model_name, loader, device, exp, season, note=''):
-    gridshape = (54, 42)  # (H, W)
-    accum_dict = {
-        'DJF': [torch.zeros(gridshape)] * 3 + [0],
-        'MAM': [torch.zeros(gridshape)] * 3 + [0],
-        'JJA': [torch.zeros(gridshape)] * 3 + [0],
-        'SON': [torch.zeros(gridshape)] * 3 + [0],
-    }
+def check_accuracy(model, model_name, loader, device, exp, season, note='', perturb_dict={}, df_list=None):
+    gridshape = (53, 65) #(54, 42)  # (H, W)
 
     # Sumatra Squall MERRA2
     # extent = (92.8, 107.2, 0.0, 8.0)
 
     # CUS 3D Inc MERRA2
     # extent = (-140, -50.625, 14, 53.5)  # full repr
-    extent = (-108.75, -83.125, 24, 50.5)  # CUS ROI
+    # extent = (-108.75, -83.125, 24, 50.5)  # CUS ROI
+    extent = (-110, -70, 25, 51)
 
     # for zhang_repr CUS 2D Inc ERA5
     # extent = (-108, -84.25, 24, 47.75)
 
     lons, lats = np.linspace(extent[0], extent[1], gridshape[1]), np.linspace(extent[2], extent[3], gridshape[0])
-    plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'cmap': 'vis_precip'}
+    precip_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'figsize': (16, 4), 'cmap': 'pprecip'}
+    bias_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'figsize': (8, 8), 'cmap': 'bias'}
+    clima_plot_params = {'extent': extent, 'lons': lons, 'lats': lats, 'figsize': (16, 4), 'cmap': 'clima'}
 
     # select specific (or random) days
-    # spr and sum
-    #selected = [(2017, 8, 4), (2008, 5, 12), (2007, 4, 18), (2015, 7, 26)]
-    # summer mcs
-    #selected = [(2004, 6, 9), (2010, 7, 11), (2015, 7, 27), (2015, 7, 9)]
-    # spring mcs
-    selected = [(2004, 3, 17), (2010, 5, 18), (2016, 4, 10), (2006, 4, 1)]
-    # selected = [(np.random.choice(np.arange(1980, 2021)), np.random.choice(np.arange(4, 12)), np.random.choice(np.arange(1, 31))) for _ in range(4)]  # select 4 random days
+    match season:
+        case 'both':
+            selected = [(2017, 8, 4), (2008, 5, 12), (2007, 4, 18), (2015, 7, 26)]
+        case 'sum':
+            selected = [(2004, 6, 9), (2010, 7, 11), (2015, 7, 27), (2015, 7, 9)]
+        case 'spr':
+            selected = [(2010, 3, 17), (2009, 5, 10), (2016, 4, 10), (2013, 4, 25)]
+
     # Known Sumatra Squall events (not in test apparently)
     # selected = [(2016, 7, 12), (2014, 6, 11), (2014, 6, 12)]
     spd = 8
@@ -161,82 +228,211 @@ def check_accuracy(model, model_name, loader, device, exp, season, note=''):
     mn_p = stats['precipitationmn']
     std_p = stats['precipitationstd']
 
-    losses, Ns, pccs = [], [], []
+    all_preds, all_obs = [], []
+    losses, pccs, ets = [], [], []
     model = model.to(device)
     model.eval()
+    print('*' * 60, flush=True)
+    print(f'Perturbation Experiment: {perturb_dict}', flush=True)
     with torch.no_grad():
-        for i, (source, target, time_id) in enumerate(loader):
-            print(f'Testing model on {utils.get_time_str(time_id)}...')
+        for i, (source_ds, target_ds, time_id) in enumerate(loader):
+            #print(f'Testing model on {utils.get_time_str(time_id)}...')
+            out_coords = target_ds.coords
 
             if MCS:
+                # TODO: was this ever adjusted to match correct times of MERRA data..?
                 # get mask and valid times
                 mask, times = mcs.run(time_id)
-                # mask = np.logical_not(mask)  # if want inverted for non-MCS region
-                # below already taken care of during training
-                # source, target = source.sel(time=times), target.sel(time=times)
-                # construct unique perturbation from MCS DB
-                # levels available --> self.sel_p = np.array([1000, 975, 925, 850, 750, 550, 450, 250])
-                # perturb_dict = {}
-                perturb_dict = {0: {'var': 'OMEGA', 'type': 'scale', 'scale': 0, 'region': mask, 'levels': None}}
+                # add MCS CCS mask to perturb_dict
+                if perturb_dict != {}:
+                    for k in perturb_dict.keys():
+                        perturb_dict[k]['region'] = mask
             else:
-                perturb_dict = {}
-                #perturb_dict = {0: {'var': 'T', 'type': 'scale', 'scale': 0.99, 'region': None, 'levels': None}}
+                if perturb_dict != {}:
+                    for k in perturb_dict.keys():
+                        perturb_dict[k]['region'] = None
+
+            # identify w experiment type
+            if i == 0:
+                note += utils.build_exp_note(perturb_dict)
 
             # do input perturbation
-            source = utils.perturb(source, perturb_dict)
+            source_ds = utils.perturb(source_ds, perturb_dict)
 
-            # compute
-            source = source.to_dataarray().to_numpy()
+            # normalize after perturbation
+            for v in MERRA_VARS:
+                source_ds[v] = (source_ds[v] - stats[v + 'mn']) / stats[v + 'std']
+            pv = 'precipitation'
+            target_ds[pv] = (target_ds[pv] - mn_p) / std_p
+
+            # compute and close open Datasets
+            source = source_ds.to_dataarray().to_numpy()
+            source_ds.close()
             source = torch.tensor(source).permute(1, 0, 2, 3, 4) # return as (time, var, (lev), lat, lon) 
-            target = target.to_dataarray().to_numpy()
+            target = target_ds.to_dataarray().to_numpy()
+            target_ds.close()
             target = torch.tensor(target).permute(1, 0, 2, 3) # return as (time, var, lat, lon) 
 
             # send to device and predict
             source, target = source.to(device=device), target.to(device=device)
             pred = model(source)
+            # un-standardize
             pred, target = pred * std_p + mn_p, target * std_p + mn_p
-            loss = F.mse_loss(pred, target)
-            losses.append(loss.item())
-            Ns.append(source.shape[0])
-            pccs.append(utils.cum_pcc(pred, target))
-            check = torch.where(pccs[-1] >= 0.7, True, False)
-            if torch.any(check):
-                print(time_id)
 
-            if BIAS:
-                # TODO: split into diurnal cycle.? some plot of bias over time steps?
-                # or plot average daily regional rainfall over diuranl cycle for each season, target vs. pred?
-                season = utils.get_season_str(time_id)
-                pred_batch_accum, n_days = utils.calc_batch_accum(pred, steps_per_day=spd)
-                target_batch_accum, _ = utils.calc_batch_accum(target, steps_per_day=spd)
-                bias_batch_accum, _ = utils.calc_batch_accum(pred - target, steps_per_day=spd)
-                accum_dict[season][0] += pred_batch_accum.numpy(force=True)
-                accum_dict[season][1] += target_batch_accum.numpy(force=True)
-                accum_dict[season][2] += bias_batch_accum.numpy(force=True)
-                accum_dict[season][3] += n_days
+            # accumulate loss
+            loss = torch.mean((pred - target) ** 2, dim=(2, 3))
+            losses.append(loss)
+
+            # grab test metrics
+            pccs.append(utils.cum_pcc(pred, target))
+            ets.append(utils.cum_ets(pred, target))
+
+            pred_da = xr.DataArray(
+                data=pred.squeeze(1).numpy(force=True),
+                dims=('time', 'lat', 'lon'),
+                coords=out_coords,
+                name='precip'
+            )
+            obs_da = xr.DataArray(
+                data=target.squeeze(1).numpy(force=True),
+                dims=('time', 'lat', 'lon'),
+                coords=out_coords,
+                name='precip'
+            )
+            all_preds.append(pred_da)
+            all_obs.append(obs_da)
 
             # do precip prediction plotting
-            # TODO: fix this to grab correct days when selecting just for MCS days
-            day_sel = utils.match_time_str(time_id, selected)
-            for d in day_sel:
-                time_sel = utils.get_time_str(time_id, day_sel)
-                # fetch specific day from batch
-                pred_sel = pred[d * spd:(d + 1) * spd]
-                target_sel = target[d * spd:(d + 1) * spd]
-                utils.plot_precip(pred_sel, target_sel, time_sel, plot_params, model_name, note=note)
+            # TODO: can for sure fix this with xarray stuff
+            if PRECIP:
+                # TODO: fix this to grab correct days when selecting just for MCS days
+                day_sel = utils.match_time_str(time_id, selected)
+                for d in day_sel:
+                    time_sel = utils.get_time_str(time_id, day_sel)
+                    # fetch specific day from batch
+                    pred_sel = pred[d * spd:(d + 1) * spd]
+                    target_sel = target[d * spd:(d + 1) * spd]
+                    utils.plot_precip(
+                        pred_sel,
+                        target_sel,
+                        time_sel,
+                        precip_plot_params,
+                        model_name,
+                        note=note
+                    )
 
-    test_loss = np.sum(np.array(Ns) * np.array(losses)) / np.sum(np.array(Ns))
+    # Compile all predicted and observed precip data
+    complete_pred = xr.merge(all_preds)
+    complete_obs = xr.merge(all_obs)
+
+    # TODO: possibly easier way to manage this re: bias vs. just pred/obs accum, selecting between them on CLI
+    # Seasonal statistics -- mean daily (bias)
+    seasonal_pred = complete_pred.groupby('time.season').mean(dim='time') * spd
+    seasonal_obs = complete_obs.groupby('time.season').mean(dim='time') * spd
+    bb = (seasonal_pred - seasonal_obs)
+    # total seasonal mean daily precip bias
+    utils.plot_mean(
+        {ssn: bb.sel(season=ssn)['precip'].as_numpy() for ssn in bb.season.values},
+        bias_plot_params,
+        model_name,
+        note=note,
+        bias=True
+    )
+    # total seasonal mean daily precip
+    utils.plot_mean(
+        {ssn + ' PRED': seasonal_pred.sel(season=ssn)['precip'].as_numpy() for ssn in seasonal_pred.season.values} | {ssn + ' OBS': seasonal_obs.sel(season=ssn)['precip'].as_numpy() for ssn in seasonal_obs.season.values},
+        clima_plot_params,
+        model_name,
+        note=note,
+        bias=False
+    )
+
+
+    # Hourly statistics
+    hourly_pred = complete_pred.groupby('time.hour').mean(dim='time') * spd
+    hourly_obs = complete_obs.groupby('time.hour').mean(dim='time') * spd
+
+    # regional mean daily mean.
+    weight = np.cos(np.radians(hourly_pred.lat))
+    hov_pred = hourly_pred.weighted(weight).mean(dim='lat')
+    # TODO: handle cyclic coord and plotting with midnight in the middle
+    #new_hour = (hov_pred.hour - 6) % 24
+    #hov_pred['hour'] = new_hour
+    #hov_pred = hov_pred.roll(hour=2, roll_coords=True)
+    #print(hov_pred)
+    hov_pred['precip'].plot.pcolormesh()
+    plt.savefig(f'./{season}_hovpred_{note}.png')
+    plt.clf()
+    plt.close()
+    hov_obs = hourly_obs.weighted(weight).mean(dim='lat')
+    #hov_obs['hour'] = new_hour
+    #hov_obs = hov_obs.roll(hour=2, roll_coords=True)
+    #print(hov_obs)
+    hov_obs['precip'].plot.pcolormesh()
+    plt.savefig(f'./{season}_hovobs_{note}.png')
+    plt.clf()
+    plt.close()
+
+    # TODO: cleaner way to do this?
+    utils.plot_mean(
+        {'PRED ' + str((t - 6) % 24) + 'CST': hourly_pred.sel(hour=t)['precip'].as_numpy() for t in hourly_pred.hour.values} | {'OBS ' + str((t - 6) % 24) + 'CST': hourly_obs.sel(hour=t)['precip'].as_numpy() for t in hourly_obs.hour.values},
+        clima_plot_params,
+        model_name,
+        note=note + '_diurnal',
+        bias=False
+    )
+
+    test_loss = torch.cat(losses, dim=0).numpy(force=True).flatten()
     all_pccs = torch.cat(pccs, dim=0).numpy(force=True).flatten()
     good_pccs = np.sum(np.where(all_pccs >= 0.7, 1, 0))
     test_pcc = np.mean(all_pccs)
-    print(f'Per-item mean MSE: {test_loss}')
-    print(f'Per-item mean centered PCC: {test_pcc}')
-    print(f'Number of items with PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 100:.2f}%')
+    all_ets = torch.cat(ets, dim=0).numpy(force=True).flatten()
+    test_ets = np.mean(all_ets)
+    print(f'Per-item mean MSE: {np.mean(test_loss)}', flush=True)
+    print(f'Per-item mean centered PCC: {test_pcc}', flush=True)
+    print(f'Items w/PCC > 0.7: {good_pccs} of {len(all_pccs)}, {good_pccs / len(all_pccs) * 100:.2f}%', flush=True)
+    print(f'Per-item mean ETS: {test_ets}', flush=True)
 
-    if BIAS:
-        # per-cell average daily values
-        mean_daily_bias = {k: v[2] / v[3] for k, v in accum_dict.items() if v[3] != 0}
-        utils.plot_bias(mean_daily_bias, plot_params, model_name, note=note)
+    return
+
+    # NOTE: used for shuffled feature importance
+    # RMSE/ETS importance metrics:
+    # to save rmse and ets for each test item
+    #df = pd.DataFrame({'rmse': np.sqrt(test_loss), 'ets': all_ets})
+    #df.to_csv(f'./{exp}_{season}_test_stats.csv')
+    #return
+    ctrl_df = pd.read_csv(f'./{exp}_{season}_test_stats.csv')
+    ctrl_loss = ctrl_df['rmse'].to_numpy()
+    ctrl_ets = ctrl_df['ets'].to_numpy()
+    Irmse = (np.sqrt(test_loss) - ctrl_loss) / ctrl_loss
+    a1, b1, c1, d1 = calc_stats(Irmse)
+    Iets = (ctrl_ets - all_ets) / (ctrl_ets + 1e-5)  # in case there are legit 0s.. why.? will these screw up ets metrics?
+    a2, b2, c2, d2 = calc_stats(Iets)
+    df_index = perturb_dict[0]['var'] + str(perturb_dict[0]['levels'])
+    df = pd.DataFrame({
+        'mean_mse': np.mean(test_loss),
+        'mean_pcc': test_pcc,
+        'n_good_pcc': good_pccs,
+        'mean_ets': test_ets,
+        'rmse_imp_mean': a1,
+        'rmse_imp_med': b1,
+        'rmse_imp_25p': c1,
+        'rmse_imp_75p': d1,
+        'ets_imp_mean': a2,
+        'ets_imp_med': b2,
+        'ets_imp_25p': c2,
+        'ets_imp_75p': d2,
+        'mean_reg_bias': mb
+    },
+    index=[df_index])
+    df_list.append(df)
+    return df_list
+
+def calc_stats(arr):
+    mn, md = np.mean(arr), np.median(arr)
+    iqr25, iqr75 = np.percentile(arr, 25), np.percentile(arr, 75)
+    print(mn, md, iqr25, iqr75, flush=True)
+    return mn, md, iqr25, iqr75
 
 # ---------------------------------------------------------------------------------
 if __name__ == '__main__': 

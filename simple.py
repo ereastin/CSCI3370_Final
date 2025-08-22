@@ -7,12 +7,12 @@ from Components import *
 PRINT = False
 ROI = True
 ATTN = True
-N, D, H, W = 6, 16, 80, 144
+N, D, H, W = 6, 28, 81, 145
 # ---------------------------------------------------------------------------------
 def main():
-    base = 32
+    base = 36
     lin_act = 0.117
-    Na, Nb, Nc = 1, 1, 1
+    Na, Nb, Nc = 5, 10, 5
     lr = 2.44e-04
     wd = 0.036
     drop_p = 0.163
@@ -44,7 +44,7 @@ class S1(nn.Module):
             Conv3(base, k=(3, 1, 1), s=1, p='same', d=1, b=b, drop_p=drop_p),
             Conv3(base, k=(1, 3, 1), s=1, p='same', d=1, b=b, drop_p=drop_p),
             Conv3(base, k=(1, 1, 3), s=1, p='same', d=1, b=b, drop_p=drop_p),
-            Conv3(2 * base, k=3, s=2, p=0, b=b, drop_p=drop_p) if D == 16 else Conv3(2 * base, k=3, s=1, p=1, b=b)
+            Conv3(2 * base, k=3, s=2, p=0, b=b, drop_p=drop_p)
         )
 
     def forward(self, x):
@@ -236,7 +236,7 @@ class C(nn.Module):
 # ---------------------------------------------------------------------------------
 class invB(nn.Module):
     # (24 + 24)b -> 24b
-    def __init__(self, base, b=False, drop_p=0.0, attn=False):
+    def __init__(self, base, in_depth, b=False, drop_p=0.0, attn=False):
         super(invB, self).__init__()
         self.attn = attn
         self.net = nn.Sequential(
@@ -246,7 +246,7 @@ class invB(nn.Module):
         )
 
         if attn:
-            self.compress = Attn(36 * base, 24 * base, 1, b=b) if D == 16 else Attn(36 * base, 24 * base, 1, b=b)
+            self.compress = Attn(36 * base, 24 * base, in_depth, b=b)
         else:
             self.compress = Conv3(24 * base, k=(2, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if D == 16 else Conv3(24 * base, k=1, s=1, p=0, b=b)
 
@@ -267,7 +267,7 @@ class invB(nn.Module):
 # ---------------------------------------------------------------------------------
 class invA(nn.Module):
     # (12 + 12)b -> 12b
-    def __init__(self, base, b=False, drop_p=0.0, attn=False):
+    def __init__(self, base, in_depth, b=False, drop_p=0.0, attn=False):
         super(invA, self).__init__()
         self.attn = attn
         self.net = nn.Sequential(
@@ -277,7 +277,7 @@ class invA(nn.Module):
         )
 
         if attn:
-            self.compress = Attn(16 * base, 12 * base, 2, b=b) if D == 16 else Attn(16 * base, 12 * base, 2, b=b)
+            self.compress = Attn(16 * base, 12 * base, in_depth, b=b)
         else:
             self.compress = Conv3(12 * base, k=(4, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if D == 16 else Conv3(12 * base, k=(2, 1, 1), s=1, p=0, b=b)
 
@@ -320,12 +320,12 @@ class invRedB(nn.Module):
 # ---------------------------------------------------------------------------------
 class invS1(nn.Module):
     # (2 + 2)b -> 2b
-    def __init__(self, base, b=False, drop_p=0.0, attn=False):
+    def __init__(self, base, in_depth, b=False, drop_p=0.0, attn=False):
         super(invS1, self).__init__()
         self.attn = attn
         self.net = Upsample2(2 * base, b=b)  # TODO: this needs to change based on if S1 reduces size or not
         if attn:
-            self.compress = Attn(4 * base, 2 * base, 7, b=b) if D == 16 else Attn(4 * base, 2 * base, 8, b=b)
+            self.compress = Attn(4 * base, 2 * base, in_depth, b=b)
         else:
             self.compress = Conv3(2 * base, k=(14, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if D == 16 else Conv3(2 * base, k=(8, 1, 1), s=1, p=0, b=b)
 
@@ -357,7 +357,7 @@ class invS2(nn.Module):
 # ---------------------------------------------------------------------------------
 class invS3(nn.Module):
     # (6 + 6)b -> 5b
-    def __init__(self, base, b=False, drop_p=0.0, attn=False):
+    def __init__(self, base, in_depth, b=False, drop_p=0.0, attn=False):
         super(invS3, self).__init__()
         self.attn = attn
         self.net = nn.Sequential(
@@ -367,7 +367,7 @@ class invS3(nn.Module):
             Conv2(5 * base, k=1, s=1, p=0, b=b, drop_p=drop_p)
         )
         if attn:
-            self.compress = Attn(12 * base, 6 * base, 4, b=b) if D == 16 else Attn(12 * base, 6 * base, 4, b=b)
+            self.compress = Attn(12 * base, 6 * base, in_depth, b=b)
         else:
             self.compress = nn.Sequential(Conv3(6 * base, k=(7, 1, 1), s=1, p=0, b=b, drop_p=drop_p) if D == 16 else Conv3(6 * base, k=(4, 1, 1), s=1, p=0, b=b))
 
@@ -419,22 +419,27 @@ class Simple(nn.Module):
 
         # up layers
         self.irb = invRedB(base, b=bias)  #
-        self.ib = invB(base, b=bias, attn=ATTN)  #
+        self.ib = invB(base, 2, b=bias, attn=ATTN)  #
         self.ira = invRedA(base, b=bias)  #
-        self.ia = invA(base, b=bias, attn=ATTN)  #
+        self.ia = invA(base, 4, b=bias, attn=ATTN)  #
         self.is4 = invS4(base, b=bias)  #
-        self.is3 = invS3(base, b=bias, attn=ATTN)  #
+        self.is3 = invS3(base, 7, b=bias, attn=ATTN)  #
         self.is2 = invS2(base, b=bias)  #
-        self.is1 = invS1(base, b=bias, attn=ATTN)  #
+        self.is1 = invS1(base, 13, b=bias, attn=ATTN)  #
 
-        if ROI:
+        if ROI:  # 53H, 65W
             self.final = nn.Sequential(
-                nn.MaxPool2d(kernel_size=(3, 5), stride=(1, 2)),
-                Conv2(base, k=5, s=1, p=0, d=3, b=bias, drop_p=drop_p),
-                Conv2(base, k=5, s=1, p=0, d=2, b=bias, drop_p=drop_p),
+                nn.AdaptiveMaxPool2d(output_size=(63, 75)),
                 Conv2(base, k=5, s=1, p=0, b=bias, drop_p=drop_p),
-                Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
-                Conv2(base, k=(1, 3), s=1, p=0, b=bias, drop_p=drop_p),
+                Conv2(base, k=3, s=1, p=0, b=bias, drop_p=drop_p),
+                Conv2(base, k=3, s=1, p=0, b=bias, drop_p=drop_p),
+                Conv2(base, k=3, s=1, p=0, b=bias, drop_p=drop_p),
+                #nn.MaxPool2d(kernel_size=(3, 5), stride=(1, 2)),
+                #Conv2(base, k=5, s=1, p=(0, 4), d=3, b=bias, drop_p=drop_p),
+                #Conv2(base, k=5, s=1, p=(0, 4), d=2, b=bias, drop_p=drop_p),
+                #Conv2(base, k=5, s=1, p=(0, 2), b=bias, drop_p=drop_p),
+                #Conv2(base, k=3, s=1, p=0, b=bias, drop_p=drop_p),
+                #Conv2(base, k=3, s=1, p=0, b=bias, drop_p=drop_p),
                 nn.LazyConv2d(1, kernel_size=1, stride=1, padding=0, bias=bias),
             )
         else:

@@ -22,7 +22,7 @@ import file_utils as futils
 from functools import partial
 
 STATS = False
-NORM = True
+NORM = False
 ROI = False
 FORECAST = False
 AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
@@ -38,14 +38,14 @@ def main():
     with Client(cluster) as client:
         print(client, flush=True)
         # NOTE: if running monthly.. each month LSF + P ~ 5G
-        pd = OTPrecipDataset('train', 'inc3d_reana', season='sum', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
+        pd = OTPrecipDataset('train', 'cus', season='spr', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
             print(tt)
 
-        t2 = time.time()
 
     if STATS: pd.get_stats()
+    t2 = time.time()
     print('time:', (t2 - t1))
 
 ## ================================================================================
@@ -59,7 +59,7 @@ class OTPrecipDataset(Dataset):
         self.shuffle = shuffle
         self.ret_as_tnsr = ret_as_tnsr
 
-        if self.exp == 'inc3d_reana':
+        if self.exp == 'inc3d_reana' or self.exp == 'cus':
             self.n_months = 6 if season == 'both' else 3
             mnth_offset = 6 if season == 'sum' else 3
         else:
@@ -73,7 +73,7 @@ class OTPrecipDataset(Dataset):
         if self.weekly:
             t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
             # remove weeks without a single MCS
-            rm = [(2014, 3, 2), (2004, 4, 1), (2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
+            rm = [(2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
             for t in rm:
                 if t in t_strs:
                     t_strs.pop(t_strs.index(t))
@@ -98,7 +98,7 @@ class OTPrecipDataset(Dataset):
             case 'val':
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
-                self.t_strs = t_strs[tr + v:]
+                self.t_strs = t_strs[tr + v:]# + rm  # test these on non-MCS weeks!
             case 'check':
                 self.t_strs = t_strs
             case _:
@@ -118,6 +118,7 @@ class OTPrecipDataset(Dataset):
 
 
         ## For variables statistics/data norm
+        self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
         self._stats = {k + 'mn': [] for k in self.merra_vars} | {k + 'var': [] for k in self.merra_vars}
         self._stats['Nv'] = []
         self._stats['precipitationmn'] = []
@@ -151,25 +152,22 @@ class OTPrecipDataset(Dataset):
 
         # NEW filter for MCSs only
         t_slc = mcs.get_times(time_id)
-        #t_slc = slice(None, None)
+        t_slc_rot = t_slc + np.timedelta64(3, 'h')
 
         source = self.read_source(
             source_rw_pth,
             t_slc
-            #self.merra_drop_vars,
-            #time=t_slc,
-            #lev=self.p,
         )
         target = self.read_target(
             target_rw_pth,
-            t_slc
-            #self.mswep_drop_vars,
-            #time=t_slc
+            t_slc_rot
         )
+        if STATS:
+            return None, None, time_id
 
         if self.ret_as_tnsr:
             source, target = self._ret_tensor(source, target)
-        
+
         sample = (source, target, time_id)
         return sample
 
@@ -228,26 +226,8 @@ class OTPrecipDataset(Dataset):
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
-    def read_source(self, in_file, t_slc): #drop_vars, **kwargs):
-        #preproc_fn = partial(futils._select_batch, **kwargs)
-        ds = xr.open_mfdataset(
-            in_file
-        )
-        '''
-            ,
-            preprocess=preproc_fn,
-            drop_variables=drop_vars,
-            concat_dim='time',
-            data_vars='minimal',
-            coords='minimal',
-            combine='nested',
-            compat='override',
-            join='override',
-            parallel=True,
-            chunks='auto',
-            engine='h5netcdf'
-        )
-        '''
+    def read_source(self, in_file, t_slc):
+        ds = xr.open_mfdataset(in_file)
         ds = ds.sel(time=t_slc)
 
         if AGG:
@@ -268,26 +248,8 @@ class OTPrecipDataset(Dataset):
         return ds
 
     # -----------------------------------------------------------------------------
-    def read_target(self, in_file, t_slc): #drop_vars, **kwargs):
-        #preproc_fn = partial(futils._select_batch, **kwargs)
-        ds = xr.open_mfdataset(
-            in_file
-        )
-        '''
-            ,
-            preprocess=preproc_fn,
-            drop_variables=drop_vars,
-            concat_dim='time',
-            data_vars='minimal',
-            coords='minimal',
-            combine='nested',
-            compat='override',
-            join='override',
-            parallel=True,
-            chunks='auto',
-            engine='h5netcdf'
-        )
-        '''
+    def read_target(self, in_file, t_slc):
+        ds = xr.open_mfdataset(in_file)
         ds = ds.sel(time=t_slc)
 
         if FORECAST:

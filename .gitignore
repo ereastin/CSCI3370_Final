@@ -1,6 +1,7 @@
 __pycache__/*
 _logs/*
 models/*
+*.csv
 *.sl
 *.png
 scratch.py

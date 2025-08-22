@@ -2,6 +2,7 @@ import dask
 from dask import array
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
+import torch
 import xarray as xr
 import xarray_regrid
 import numpy as np
@@ -43,6 +44,13 @@ BOT = 24
 RT = -83.125
 LFT = -108.75
 
+LEV = np.array([
+    1000, 975, 950, 925, 900, 875, 850,
+    825, 775, 700, 600, 550, 450, 400, 350, 300,
+    250, 200, 150, 100, 70, 
+    50, 40, 30, 20, 10, 7, 3
+])
+
 # =====================================================================
 def main():
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
@@ -50,13 +58,14 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        #source = xr.open_dataset(os.path.join(pth.SCRATCH, 'inc3d_reana', 'LSF_2004_04_0.nc'))
-        #VAR = 'U'
-        time_id = {'yr': 2004, 'mn': 4, 'days': np.arange(1, 9)}
+        source = xr.open_dataset(os.path.join(pth.SCRATCH, 'cus', 'LSF_2004_04_0.nc'))
+        VAR = 'U'
+        time_id = {'yr': 2004, 'mn': 4, 'days': torch.arange(1, 9)}
         mask, times = run(time_id)  # this is a DataArray btw
-        #source = source.sel(time=times)
-        #perturb_dict = {0: {'var': 'U', 'type': 'hshear', 'scale': 100, 'region': mask, 'levels': np.array([1000, 875, 850])}}
-        #source = utils.perturb(source, perturb_dict)
+        source = source.sel(time=times)
+        perturb_dict = {0: {'var': 'U', 'type': 'shuffle', 'scale': 100, 'region': mask, 'invert': True, 'levels': LEV[:-1]}}
+        source = utils.perturb(source, perturb_dict)
+        source.to_netcdf('./check.nc', engine='netcdf4')
 
 # ---------------------------------------------------------------------
 def get_times(time_id):
@@ -82,8 +91,6 @@ def get_times(time_id):
 def get_mask(times, time_id):
     year = time_id['yr']
     pix_data = read_pixel_data(year, times)
-    print(pix_data)
-    return
     mask = _regrid(pix_data['cloudtracknumber'], {'do': True})
 
     return mask
@@ -166,7 +173,7 @@ def read_stats(year, time_id=None):
         time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-03-01')) & (ds['end_basetime'] <= np.datetime64(f'{year}-08-30'))
     else:
         mn = str(time_id['mn']).zfill(2)
-        d0, d1 = str(time_id['days'][0]).zfill(2), str(time_id['days'][-1]).zfill(2)
+        d0, d1 = str(time_id['days'][0].item()).zfill(2), str(time_id['days'][-1].item()).zfill(2)
         time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-{mn}-{d0}T00:00')) & (ds['end_basetime'] <= np.datetime64(f'{year}-{mn}-{d1}T21:00'))
 
     select = complete_idx & time_idx

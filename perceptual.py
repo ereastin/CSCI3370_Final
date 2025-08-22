@@ -38,6 +38,15 @@ class SqueezeNet(nn.Module):
         #self.sub_mean = common.MeanShift(rgb_range, vgg_mean, vgg_std)
         self.sn.requires_grad = False
 
+    def _fft(self, pred, target):
+        p = pred - torch.mean(pred, dim=(2, 3), keepdim=True)
+        t = target - torch.mean(target, dim=(2, 3), keepdim=True)
+        fft_pred = torch.abs(torch.fft.fft2(p, norm='ortho'))
+        fft_target = torch.abs(torch.fft.fft2(t, norm='ortho'))
+        fft_wt = torch.log(1 + F.l1_loss(fft_pred, fft_target, reduction='none'))
+        fft_loss = F.l1_loss(fft_pred, fft_target, weight=fft_wt)
+        return fft_loss
+
     def _pcc(self, pred, target):
         mt = torch.mean(target, dim=(2, 3), keepdim=True)
         ts = target - mt
@@ -69,6 +78,7 @@ class SqueezeNet(nn.Module):
             return x
 
         mse = F.mse_loss(pred, target)
+        #fft = self._fft(pred, target)
         #mae = F.l1_loss(pred, target)
         #pcc = self._pcc(pred, target)
 
@@ -83,7 +93,7 @@ class SqueezeNet(nn.Module):
 
         perceptual = F.mse_loss(_pred, _target)
 
-        return 3e-3 * perceptual + mse
+        return 1e-3 * perceptual + mse
 
 if __name__ == '__main__':
     main()

@@ -29,7 +29,7 @@ from decorators import timeit
 from perceptual import SqueezeNet
 
 # for Lazy module dry-runs.. handle this better for other input shapes
-C, D, H, W = 6, 16, 80, 144
+C, D, H, W = 6, 28, 81, 145 #6, 16, 80, 144
 FROM_LOAD = False
 MIN, MAX = np.log(1.1), np.log(101)
 RET_AS_TNSR = True
@@ -95,14 +95,14 @@ def main():
         lin_act = .1
         Na, Nb, Nc = 5, 10, 5
         lr = 1e-4
-        wd = 0
-        drop_p = 0.0  # probably just leave as 0 these dont do great with CNNs?
+        wd = 0.15
+        drop_p = 0#.05  # probably just leave as 0 these dont do great with CNNs?
         bias = True
         opt_type = 'adamw'
         loss_fn = SqueezeNet().to(local_rank).float()
         #loss_fn = comp_loss_fn
         hps = {
-            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'snet',
+            'base': base, 'lin_act': lin_act, 'Na': Na, 'Nb': Nb, 'Nc': Nc, 'loss_fn': 'mse',
             'optim': opt_type, 'lr': lr, 'wd': wd, 'drop_p': drop_p, 'bias': bias
         }
 
@@ -326,6 +326,7 @@ def dice(pred, target):
     
 def comp_loss_fn(pred, target):
     mse_loss = mse(pred, target)
+    #mae_loss = mae(pred, target)
     fft_loss = fft(pred, target)
     #return mse_loss + 0.25 * fft_loss
     return mse_loss + 0.35 * fft_loss

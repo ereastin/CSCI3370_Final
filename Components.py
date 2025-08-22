@@ -42,7 +42,7 @@ class Conv3(nn.Module):
         super(Conv3, self).__init__()
         self.res = res
         self.net = nn.Sequential(
-            nn.LazyConv3d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
+            nn.LazyConv3d(c_out, kernel_size=k, stride=s, padding=p, padding_mode='replicate', dilation=d, bias=b),
             nn.ReLU(),
             #nn.NORM?3d(eps=EPS, track_running_stats=False),
             nn.Dropout3d(p=drop_p)
@@ -60,7 +60,7 @@ class Conv2(nn.Module):
         super(Conv2, self).__init__()
         self.res = res
         self.net = nn.Sequential(
-            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, dilation=d, bias=b),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, padding_mode='replicate', dilation=d, bias=b),
             nn.ReLU(),
             #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
@@ -107,12 +107,12 @@ class Upsample2(nn.Module):
     def __init__(self, c_out, k=3, s=1, p=1, b=False, drop_p=0.0):
         super(Upsample2, self).__init__()
         self.net = nn.Sequential(
-            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, padding_mode='replicate', bias=b),
             nn.ReLU(),
             # addition of below to correct upsampling artifacts?
-            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, padding_mode='replicate', bias=b),
             nn.ReLU(),
-            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, bias=b),
+            nn.LazyConv2d(c_out, kernel_size=k, stride=s, padding=p, padding_mode='replicate', bias=b),
             nn.ReLU(),
             #nn.NORM?2d(eps=EPS, track_running_stats=False),
             nn.Dropout2d(p=drop_p)
