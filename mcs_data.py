@@ -11,7 +11,7 @@ import json
 import os
 import sys
 sys.path.append('/home/eastinev/AI')
-import utils  # TODO: test the perturbations make sure they work correctly
+import utils
 import paths as pth
 
 KEEP_PIX = [
@@ -39,11 +39,6 @@ KEEP_STATS = [
     'total_rain'
 ]
 
-TOP = 50.5
-BOT = 24
-RT = -83.125
-LFT = -108.75
-
 LEV = np.array([
     1000, 975, 950, 925, 900, 875, 850,
     825, 775, 700, 600, 550, 450, 400, 350, 300,
@@ -58,18 +53,21 @@ def main():
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        source = xr.open_dataset(os.path.join(pth.SCRATCH, 'cus', 'LSF_2004_04_0.nc'))
+        #source = xr.open_dataset(os.path.join(pth.SCRATCH, 'cus', 'LSF_2004_04_0.nc'))
         VAR = 'U'
         time_id = {'yr': 2004, 'mn': 4, 'days': torch.arange(1, 9)}
+        time_id = np.arange('2017-04-01', '2017-04-09', dtype='datetime64[D]')
         mask, times = run(time_id)  # this is a DataArray btw
-        source = source.sel(time=times)
-        perturb_dict = {0: {'var': 'U', 'type': 'shuffle', 'scale': 100, 'region': mask, 'invert': True, 'levels': LEV[:-1]}}
-        source = utils.perturb(source, perturb_dict)
-        source.to_netcdf('./check.nc', engine='netcdf4')
+        print(mask)
+        print(times)
+        #source = source.sel(time=times)
+        #perturb_dict = {0: {'var': 'U', 'type': 'shuffle', 'scale': 100, 'region': mask, 'invert': True, 'levels': LEV[:-1]}}
+        #source = utils.perturb(source, perturb_dict)
+        #source.to_netcdf('./check.nc', engine='netcdf4')
 
 # ---------------------------------------------------------------------
 def get_times(time_id):
-    year = time_id['yr']
+    year = pd.Timestamp(time_id[0]).year
     good_tracks, track_idx = read_stats(year, time_id)
     # NOTE: track_idx are offset by -1 relative to mask value
 
@@ -83,13 +81,11 @@ def get_times(time_id):
 
     # TODO: if wanting stats for something need to compile in loop above and pass along
     times = np.unique(times)
-    if len(times) == 0:
-        return []
     return times
 
 # ---------------------------------------------------------------------
 def get_mask(times, time_id):
-    year = time_id['yr']
+    year = pd.Timestamp(time_id[0]).year
     pix_data = read_pixel_data(year, times)
     mask = _regrid(pix_data['cloudtracknumber'], {'do': True})
 
@@ -120,7 +116,7 @@ def read_pixel_data(year, times):
     mn1, mn2, yr2 = get_months(year)
     data_dir = f'{year}{mn1}01.0000_{yr2}{mn2}01.0000'
     times = [pd.Timestamp(t) for t in times]
-    fnames = [f'mcstrack_{year}{str(t.month).zfill(2)}{str(t.day).zfill(2)}_{str(t.hour).zfill(2)}0000.nc' for t in times]
+    fnames = [f'mcstrack_{t.strftime("%Y%m%d_%H")}0000.nc' for t in times]
     data_paths = [os.path.join(pth.MCS_DATA, data_dir, f) for f in fnames]
 
     with open('pix_lvl_vars.json', 'r') as f:
@@ -153,7 +149,7 @@ def read_stats(year, time_id=None):
     Filenames:
         mcs_tracks_final_extc_YYYYMMDD.0000_YYYYMMDD.0000.nc
         -> 2004-2017 all seasons (eg 20170101.0000-20180101.0000)
-        -> 2018-2021 warm season (Apr-Sep, eg 20180401.0000-20190901.0000)
+        -> 2018-2021 warm season (Apr-Sep, eg 20180401.0000-20180901.0000)
     **For full suite of available MCS statistics see README
     """
     mn1, mn2, yr2 = get_months(year)
@@ -170,11 +166,9 @@ def read_stats(year, time_id=None):
     # do stats read, select for only MCSs that underwent complete lifecycle and in training period
     complete_idx = ds['lifecycle_complete_flag'] == 1
     if time_id is None:
-        time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-03-01')) & (ds['end_basetime'] <= np.datetime64(f'{year}-08-30'))
+        time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-03-01')) & (ds['end_basetime'] < np.datetime64(f'{year}-09-01'))
     else:
-        mn = str(time_id['mn']).zfill(2)
-        d0, d1 = str(time_id['days'][0].item()).zfill(2), str(time_id['days'][-1].item()).zfill(2)
-        time_idx = (ds['start_basetime'] >= np.datetime64(f'{year}-{mn}-{d0}T00:00')) & (ds['end_basetime'] <= np.datetime64(f'{year}-{mn}-{d1}T21:00'))
+        time_idx = (ds['start_basetime'] >= time_id[0]) & (ds['end_basetime'] <= time_id[-1] + np.timedelta64(21, 'h'))
 
     select = complete_idx & time_idx
     good_tracks = ds.isel(tracks=select)
@@ -202,12 +196,6 @@ def get_track_stats(track):
             track['total_rain'].loc[dict(times=i)] = np.sum(agg)
     '''
 
-    #lat, lon = track['meanlat'].values[()], track['meanlon'].values[()] 
-    #good_lat = np.where((lat <= TOP) & (lat >= BOT), True, False)
-    #good_lon = np.where((lon <= RT) & (lon >= LFT), True, False)
-    # sample only MSWEP times AND in model region 'view'
-    #region_mask = good_lat & good_lon
-    #eval_mask = region_mask & time_mask
     track = track.isel(times=time_mask)
 
     return track

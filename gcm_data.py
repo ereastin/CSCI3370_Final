@@ -3,6 +3,7 @@ import xarray_regrid
 import dask
 from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
+from xgcm import Grid
 import numpy as np
 import os
 import sys
@@ -34,14 +35,6 @@ CUS_LAT = slice(25 - 1, 51 + 1)
 SEL_VARS = ['Z3', 'Q', 'T', 'U', 'V', 'OMEGA']
 ## ================================================================================
 def main():
-    '''
-    ds = xr.open_dataset('/scratch/eastinev/cus/LSF_2004_04_1.nc')
-    t = ds.coords['time'].values[()][0]
-    ds = ds['T']
-    ds = ds.sel(time=[t])
-    ds.to_netcdf('./vlgrid.nc', engine='netcdf4')
-    exit()
-    '''
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
     cluster = LocalCluster(n_workers=n_cpus)
     print(cluster, flush=True)
@@ -59,9 +52,10 @@ def main():
             #engine='h5netcdf'
         )
         ds_4x = ds_4x.sel(lat=CONUS_LAT, lon=CONUS_LON)
-        print(ds_4x.variables)
-        exit()
+
         # extract/convert precip, regrid conservative -> target
+        # this works and is relatively quick... LSF not so much
+        '''
         target_ds = convert_precip(ds_4x.PRECT)
         target_ds = utils.regrid(
             target_ds,
@@ -70,17 +64,34 @@ def main():
             'regrid_type': 'conservative'}
         )
         print(target_ds)
+        '''
         source_da = ds_4x[SEL_VARS]
-        print(np.any(source_da.isnull()))
+        print(source_da)
         exit()
-        with ProgressBar():
-            source_da = utils.regrid(
-                source_da,
-                {'do': True,
-                'target_grid': '~/AI/incept/vlgrid.nc',
-                'regrid_type': 'linear'}
-            )
-            print(source_da)
+         
+        grid = Grid(
+            source_da,
+            coords={
+                'X': {'center': 'lon'},
+                'Y': {'center': 'lat'},
+                'Z': {'center': 'lev'}
+            },
+            periodic=False,
+            autparse_metadata=False
+        )
+        T = grid.transform(
+            source_da['T'],
+            'Z',
+            LEV,
+            target_data=source_da['P']
+        )
+        source_da = utils.regrid(
+            source_da,
+            {'do': True,
+            'target_grid': '~/AI/incept/vlgrid.nc',
+            'regrid_type': 'linear'}
+        )
+        print(source_da)
 
     return
     files_ctrl = os.listdir(pth.CESMCTRL)

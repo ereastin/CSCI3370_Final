@@ -97,7 +97,6 @@ class MakeMonthly:
         # self.p = ','.join(['1000', '950', '850', '700', '500', '350', '200', '100'])
         self.bbox = '-140,-50.625,14,53.5'
         self.mswep_bbox = '-98.125,-89.375,31,52'
-        # TODO: thoughts on leaving this at 0.25 deg res? or is it better to just reconstruct at res of input?
         self.merra_wts = os.path.join(pth.SCRATCH, f'{exp}', f'merra_weights.nc')  # DONT NEED THIS NOW!
         self.mswep_wts =  os.path.join(pth.SCRATCH, f'{exp}', f'mswep_weights.nc') 
         self.era_wts = os.path.join(pth.SCRATCH, f'{exp}', f'era_weights.nc')

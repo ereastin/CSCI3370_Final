@@ -2,47 +2,51 @@ import torch
 from torch.utils.data import Dataset
 import dask
 from dask import array
-from dask.diagnostics import ProgressBar
 from dask.distributed import Client, LocalCluster
 import xarray as xr
-#from virtualizarr import open_virtual_dataset
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-import glob
 import sys
 sys.path.append('/home/eastinev/AI')
 import paths as pth
 import time
-from scipy.stats import boxcox
 import json
 from itertools import product
 import mcs_data as mcs
 import file_utils as futils
-from functools import partial
 
+# probably move some of these to class attrs.?
 STATS = False
-NORM = False
-ROI = False
-FORECAST = False
+FORECAST = True
+if FORECAST:
+    LEAD_TIME_IDX = 1
+else:
+    LEAD_TIME_IDX = 0
 AGG = False  # aggregate to 6-hourly.. 3-hourly too hard.?
-RET_AS_TNSR = True
 TWOD = False
-
+DRY = False
+MCS = False
+# weeks without a single detected MCS
+RM_WEEKS = [
+    (2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2),
+    (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0),
+    (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3),
+    (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0),
+    (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)
+]
 ## ================================================================================
 def main():
-    # TODO: cant get LocalCluster/Client to interact with pytorch DataLoader workers...
     n_cpus = int(os.environ['SLURM_JOB_CPUS_PER_NODE'])
     cluster = LocalCluster(n_workers=n_cpus, memory_limit=None)  # have to specify this think it defaults to 4 or smthn
     print(cluster, flush=True)
     with Client(cluster) as client:
         print(client, flush=True)
-        # NOTE: if running monthly.. each month LSF + P ~ 5G
-        pd = OTPrecipDataset('train', 'cus', season='spr', weekly=True, shuffle=False, ret_as_tnsr=RET_AS_TNSR)
+        pd = OTPrecipDataset('train', 'cus', season='sum', standardize=False, shuffle=False, ret_as_tnsr=True)
         t1 = time.time()
         for i, (s, t, tt) in enumerate(pd):
-            print(tt)
-
+            if int(tt[0].astype(str).split('-')[0]) == 2012:
+                print(1)
 
     if STATS: pd.get_stats()
     t2 = time.time()
@@ -50,40 +54,44 @@ def main():
 
 ## ================================================================================
 class OTPrecipDataset(Dataset):
-    def __init__(self, mode, exp, season='both', weekly=False, shuffle=False, ret_as_tnsr=True):
+    def __init__(self, mode, exp, season='both', standardize=True, shuffle=False, ret_as_tnsr=True, cesm=False, cesm_exp=''):
         super(OTPrecipDataset, self).__init__()
         self.mode = mode
         self.exp = exp
         self.season = season
-        self.weekly = weekly
+        self._STANDARDIZE = standardize
         self.shuffle = shuffle
         self.ret_as_tnsr = ret_as_tnsr
+        self._CESM = cesm
+        self._CESM_EXP = cesm_exp
 
-        if self.exp == 'inc3d_reana' or self.exp == 'cus':
-            self.n_months = 6 if season == 'both' else 3
-            mnth_offset = 6 if season == 'sum' else 3
-        else:
-            self.n_months = 8
-            mnth_offset = 4
+        # TODO: can pull this from file_utils?
+        self.n_months = 6 if season == 'both' else 3
+        mnth_offset = 6 if season == 'sum' else 3
 
         yrs = list(range(2004, 2021))  # list(range(1980, 2021))
         mnths = list(range(mnth_offset, mnth_offset + self.n_months))
         wks = list(range(4))
 
-        if self.weekly:
-            t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
-            # remove weeks without a single MCS
-            rm = [(2010, 3, 0), (2019, 3, 2), (2018, 3, 3), (2018, 3, 1), (2020, 3, 2), (2015, 3, 2), (2019, 3, 3), (2015, 3, 0), (2018, 4, 2), (2018, 3, 0), (2020, 3, 3), (2019, 3, 0), (2012, 3, 0), (2014, 3, 3), (2018, 4, 3), (2018, 3, 2), (2006, 3, 0), (2014, 3, 1), (2020, 3, 0), (2013, 3, 0), (2019, 3, 1), (2020, 3, 1), (2004, 3, 1), (2007, 4, 1)]
-            for t in rm:
+        t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
+        # remove weeks without a single MCS
+        #if MCS:
+        if not self._CESM:
+            for t in RM_WEEKS:
                 if t in t_strs:
                     t_strs.pop(t_strs.index(t))
-        else:  # monthly
-            t_strs = [(l[0], l[1]) for l in list(product(yrs, mnths))]
+        
+        # TODO: fix all this crap
+        if self._CESM:
+            yrs = list(range(1979, 1984))
+            mnths = list(range(mnth_offset, mnth_offset + self.n_months))
+            wks = list(range(4))
+            cesm_t_strs = [(l[0], l[1], l[2]) for l in list(product(yrs, mnths, wks))]
 
         # fix the seed
-        if self.mode != 'prep':
-            rng = np.random.default_rng(seed=4207765)
-            rng.shuffle(t_strs)
+        # TODO: bad way to handle this.. if removing/adding weeks you screw up the shuffle order and can contaminate test data
+        rng = np.random.default_rng(seed=4207765)
+        rng.shuffle(t_strs)
 
         l = len(t_strs)
         tr, v, te = int(.80 * l), int(.10 * l), int(.10 * l)
@@ -98,24 +106,16 @@ class OTPrecipDataset(Dataset):
             case 'val':
                 self.t_strs = t_strs[tr:tr + v]
             case 'test':
-                self.t_strs = t_strs[tr + v:]# + rm  # test these on non-MCS weeks!
+                self.t_strs = t_strs[tr + v:]
+                if MCS and self.season == 'spr' and DRY:
+                    self.t_strs += RM_WEEKS  # test these on non-MCS weeks
+                if self._CESM:
+                    self.t_strs = cesm_t_strs
             case 'check':
                 self.t_strs = t_strs
             case _:
                 print('Mode {mode} is not correct')
                 sys.exit(21)
-
-        #LEV = np.array([
-        #    1000, 975, 950, 925, 900, 875, 850,
-        #    825, 775, 700, 600, 550, 450, 400, 350, 300,
-        #    250, 200, 150, 100, 70, 
-        #    50, 40, 30, 20, 10, 7, 3
-        #])
-        self.p = np.array([
-            1000, 975, 950, 925, 900, 875, 850,
-            800, 750, 650, 550, 450, 350, 250, 150, 100
-        ])
-
 
         ## For variables statistics/data norm
         self.merra_vars = ['U', 'V', 'OMEGA', 'H', 'T', 'QV']  # if interested could use cloud ice and liquid mass mixing ratios?
@@ -125,14 +125,24 @@ class OTPrecipDataset(Dataset):
         self._stats['precipitationvar'] = []
         self._stats['Np'] = []
 
-        self.stats_pth = f'./{self.exp}_norm_vars_{self.season}'
+        # TODO: fix this to accept exp name
+        # can we add which stats file was used into the hyperparams for loading.?
+        # still need to generate by if mode == 'test' then look at hps?
+        self.stats_pth = f'./cus_norm_vars_{self.season}'
         if AGG: self.stats_pth += '_agg'
-        if ROI: self.stats_pth += '_roi'
         self.stats_pth += '_mcs'
         self.stats_pth += '.json'
         if os.path.exists(self.stats_pth):
+            print(f'Loading training set statistics from {self.stats_pth}')
             with open(self.stats_pth, 'r') as f:
                 self.stats = json.load(f)
+                # for using CESM data
+                self.stats['Z3mn'] = self.stats['Hmn']
+                self.stats['Z3std'] = self.stats['Hstd']
+                self.stats['Qmn'] = self.stats['QVmn']
+                self.stats['Qstd'] = self.stats['QVstd']
+                self.stats['PRECTmn'] = self.stats['precipitationmn']
+                self.stats['PRECTstd'] = self.stats['precipitationstd']
 
     # -----------------------------------------------------------------------------
     def __len__(self):
@@ -140,28 +150,44 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def __getitem__(self, idx):
-        if self.weekly:
-            (year, month, week) = self.t_strs[idx] 
-            source_rw_pth, target_rw_pth = futils._get_filepaths(year, month, week, self.exp, forecast=FORECAST)
+        (year, month, week) = self.t_strs[idx] 
+        source_rw_pth, target_rw_pth = futils._get_filepaths(year, month, week, self.exp, forecast=FORECAST, cesm_exp=self._CESM_EXP)
+
+        # now datetime arange
+        if self._CESM:
+            time_id = futils._get_wk_days_no_leap(year, month, week)
         else:
-            (year, month), week = self.t_strs[idx], None
-            fname = f'{year}_{str(month).zfill(2)}_*.nc'
+            time_id = futils._get_wk_days_leap(year, month, week)
 
-        wk_days, _ = futils._get_wk_days(year, month, week)
-        time_id = {'yr': year, 'mn': month, 'days': wk_days}
+        # Filter for MCSs only
+        if MCS:
+            t = mcs.get_times(time_id)  # this returns empty list if no MCS present:
+            # if .sel(time=[]) this selects NONE, if drop_sel(time=[]) this drops NONE
+            if FORECAST:
+                t_shift = t + np.timedelta64(3 * LEAD_TIME_IDX, 'h')
+            else:
+                t_shift = t
+        else:
+            t, t_shift = slice(None, None), slice(None, None)
 
-        # NEW filter for MCSs only
-        t_slc = mcs.get_times(time_id)
-        t_slc_rot = t_slc + np.timedelta64(3, 'h')
+        try:
+            # read in source and target datasets
+            source = self.read_source(
+                source_rw_pth,
+                sel_time=t
+            )
+            target = self.read_target(
+                target_rw_pth,
+                sel_time=t_shift,
+                batch_size=len(source.time),  # these used for forecasting
+                lead_time=LEAD_TIME_IDX  # INDEX lead time, e.g. 1 == next 3hourly step, 8 == next day
+            )
+        except FileNotFoundError:
+            return None, None, time_id
+        except OSError:
+            print(source_rw_pth, target_rw_pth)
+            exit()
 
-        source = self.read_source(
-            source_rw_pth,
-            t_slc
-        )
-        target = self.read_target(
-            target_rw_pth,
-            t_slc_rot
-        )
         if STATS:
             return None, None, time_id
 
@@ -173,7 +199,6 @@ class OTPrecipDataset(Dataset):
 
     # -----------------------------------------------------------------------------
     def _ret_tensor(self, source_ds, target_ds):
-        # TODO: sure permute is ok? dont need to make sure ordering is correct? what if inverted or something?
         source = torch.tensor(source_ds.to_dataarray().to_numpy())
         source_ds.close()
         if TWOD:
@@ -226,9 +251,11 @@ class OTPrecipDataset(Dataset):
             json.dump(stats_dump, f)
 
     # -----------------------------------------------------------------------------
-    def read_source(self, in_file, t_slc):
+    def read_source(self, in_file, sel_time=slice(None, None)):
         ds = xr.open_mfdataset(in_file)
-        ds = ds.sel(time=t_slc)
+
+        if MCS:
+            ds = ds.drop_sel(time=sel_time) if DRY else ds.sel(time=sel_time)
 
         if AGG:
             ds = ds.resample(time='6h').mean()
@@ -241,21 +268,23 @@ class OTPrecipDataset(Dataset):
             self._stats['Nv'].append(dav.count().data)
             return
 
-        if NORM:
-            for v in self.merra_vars:
+        if self._STANDARDIZE:
+            for v in ds.variables:
+                if v in ['time', 'lat', 'lon', 'plev', 'lev']:
+                    continue
                 ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
 
         return ds
 
     # -----------------------------------------------------------------------------
-    def read_target(self, in_file, t_slc):
+    def read_target(self, in_file, sel_time=slice(None, None), batch_size=None, lead_time=0):
         ds = xr.open_mfdataset(in_file)
-        ds = ds.sel(time=t_slc)
 
-        if FORECAST:
-            # TODO: fix this to accept MCS time stuff
-            # what if want farther out? cant feed LSF autoregressively so would just be a 'jump'
-            ds = ds.isel(time=slice(1, 64 + 1))
+        if MCS:
+            ds = ds.drop_sel(time=sel_time) if DRY else ds.sel(time=sel_time)
+
+        if FORECAST:  # AFAIK this wont work well for MCS-specific times
+            ds = ds.isel(time=slice(lead_time, batch_size + lead_time))
 
         if AGG:
             ds = ds.resample(time='6h').sum()
@@ -268,9 +297,11 @@ class OTPrecipDataset(Dataset):
             self._stats['Np'].append(dav.count().data)
             return
 
-        if NORM:
-            v = 'precipitation'
-            ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
+        if self._STANDARDIZE:
+            for v in ds.variables:
+                if v in ['time', 'lat', 'lon', 'plev', 'lev']:
+                    continue
+                ds[v] = (ds[v] - self.stats[v + 'mn']) / self.stats[v + 'std']
         
         return ds
 
